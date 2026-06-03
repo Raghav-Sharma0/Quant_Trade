@@ -9,10 +9,8 @@
 *.pfx
 secrets/
 credentials/
-
 *.log
 logs/
-
 .DS_Store
 Thumbs.db
 Desktop.ini
