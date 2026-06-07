@@ -120,4 +120,4 @@ constexpr size_t MAX_TRADES = 10 * 1024 * 1024;
 constexpr size_t SYMBOLS = 1024;  
 constexpr size_t PRICE_LEVELS = 10000; 
 
-}  
+}  // namespace hft
