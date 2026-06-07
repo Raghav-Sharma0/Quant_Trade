@@ -27,60 +27,89 @@ public:
         std::vector<Trade> trades;
         uint32_t remaining_qty;
     };
-    
-    MatchResult match_order(Order incoming) noexcept {
-        MatchResult result;
-        result.remaining_qty = incoming.quantity;
-        
-        if (incoming.symbol_id >= books.size()) {
-            return result;
-        }
-        
-        OrderBook& book = books[incoming.symbol_id];
-   
-        while (result.remaining_qty > 0) {
-            const auto* counterparty_orders = 
-                book.get_counterparty_orders(
-                    incoming.side == static_cast<uint8_t>(OrderSide::BUY));
-            
-            if (!counterparty_orders || counterparty_orders->empty()) {
-                break;
-            }
-            
-            const Order& existing = counterparty_orders->front();
-            
-            if (!should_match(incoming, existing)) {
-                break;
-            }
-            
-            uint32_t match_qty = std::min(result.remaining_qty, existing.remaining());
-            
-            Trade trade(++trade_counter, 
-                       incoming.side == static_cast<uint8_t>(OrderSide::BUY) ? 
-                           incoming.order_id : existing.order_id,
-                       incoming.side == static_cast<uint8_t>(OrderSide::BUY) ? 
-                           existing.order_id : incoming.order_id,
-                       existing.price, match_qty, incoming.symbol_id);
-            
-            result.trades.push_back(trade);
-            result.remaining_qty -= match_qty;
-            
-            if (existing.remaining() == match_qty) {
-                order_lookup.erase(existing.order_id);
-                book.remove_order(existing);
-            }
-        }
-        
-        if (result.remaining_qty > 0) {
-            incoming.quantity = result.remaining_qty;
-            book.add_order(incoming);
-            order_lookup[incoming.order_id] = 
-                std::make_tuple(incoming.symbol_id, incoming.price, incoming.side);
-        }
-        
+MatchResult match_order(Order incoming) noexcept {
+    MatchResult result;
+    result.remaining_qty = incoming.quantity;
+
+    if (incoming.symbol_id >= books.size()) {
         return result;
     }
 
+    OrderBook& book = books[incoming.symbol_id];
+
+    while (result.remaining_qty > 0) {
+
+        const auto* counterparty_orders =
+            book.get_counterparty_orders(
+                incoming.side == static_cast<uint8_t>(OrderSide::BUY));
+
+        if (!counterparty_orders || counterparty_orders->empty()) {
+            break;
+        }
+
+        const Order& existing = counterparty_orders->front();
+
+        if (!should_match(incoming, existing)) {
+            break;
+        }
+
+        uint32_t existing_qty = existing.quantity;
+
+        uint32_t match_qty =
+            std::min(result.remaining_qty, existing_qty);
+
+        Trade trade(
+            ++trade_counter,
+            incoming.side == static_cast<uint8_t>(OrderSide::BUY)
+                ? incoming.order_id
+                : existing.order_id,
+            incoming.side == static_cast<uint8_t>(OrderSide::BUY)
+                ? existing.order_id
+                : incoming.order_id,
+            existing.price,
+            match_qty,
+            incoming.symbol_id
+        );
+
+        result.trades.push_back(trade);
+
+        result.remaining_qty -= match_qty;
+
+        order_lookup.erase(existing.order_id);
+        book.remove_order(existing);
+
+        if (existing_qty > match_qty) {
+
+            Order remaining = existing;
+            remaining.quantity = existing_qty - match_qty;
+
+            book.add_order(remaining);
+
+            order_lookup[remaining.order_id] =
+                std::make_tuple(
+                    remaining.symbol_id,
+                    remaining.price,
+                    remaining.side
+                );
+        }
+    }
+
+    if (result.remaining_qty > 0) {
+
+        incoming.quantity = result.remaining_qty;
+
+        book.add_order(incoming);
+
+        order_lookup[incoming.order_id] =
+            std::make_tuple(
+                incoming.symbol_id,
+                incoming.price,
+                incoming.side
+            );
+    }
+
+    return result;
+}
     bool cancel_order(uint16_t symbol_id, uint64_t order_id) noexcept {
         auto it = order_lookup.find(order_id);
         if (it == order_lookup.end()) {
@@ -112,7 +141,7 @@ public:
     }
     
 private:
-    bool should_match(const Order& incoming, const Order& existing) const noexcept {
+    bool should_match( Order& incoming, const Order& existing) const noexcept {
         if (incoming.side == static_cast<uint8_t>(OrderSide::BUY)) {
             return incoming.price >= existing.price;
         } else {

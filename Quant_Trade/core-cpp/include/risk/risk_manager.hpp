@@ -31,7 +31,7 @@ public:
             l.current_position = 0;
             l.max_loss = 100000;
             l.current_loss = 0;
-            l.max_order_qty = 10000;
+            l.max_order_qty = 1000000;
         }
     }
     
