@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
 project(hft_system CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -fno-exceptions -fno-rtti")
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -march=native -fno-exceptions -fno-rtti")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 

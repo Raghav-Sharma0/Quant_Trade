@@ -16,11 +16,10 @@ int main() {
     
     SimpleSpreadStrategy strategy(1);
     
-    Order* order1 = strategy.generate_order(md);
-    assert(order1 != nullptr);
+    auto order1 = strategy.generate_order(md);
+    assert(order1.has_value());
     assert(order1->side == static_cast<uint8_t>(OrderSide::BUY));
     printf("✓ Strategy generates buy order on wide spread\n");
-    delete order1;
     
     MarketData tight_md(0);
     tight_md.best_bid_price = 100;
@@ -29,8 +28,8 @@ int main() {
     tight_md.best_ask_qty = 1000;
     tight_md.symbol_id = 0;
     
-    Order* order2 = strategy.generate_order(tight_md);
-    assert(order2 == nullptr);
+    auto order2 = strategy.generate_order(tight_md);
+    assert(!order2.has_value());
     printf("✓ Strategy skips tight spread\n");
     
     printf("\nAll strategy tests passed!\n");

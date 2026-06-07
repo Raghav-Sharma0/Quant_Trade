@@ -1,32 +1,36 @@
 #include <iostream>
 #include <x86intrin.h>
+#include <memory>
 #include "../include/matching_engine/matching_engine.hpp"
 #include "../include/common/types.hpp"
+#include "../include/common/cacheline.hpp"
 
 using namespace hft;
 
 int main() {
-    MatchingEngine engine(1);
+    auto engine = std::make_unique<MatchingEngine>(1);
     LatencyStats match_stats;
     
     const int NUM_MATCHES = 10000;
     
+    MatchResult result;
+    
     for (int i = 0; i < NUM_MATCHES / 2; ++i) {
-        Order buy(i, 100, 100, OrderSide::BUY, 0);
-        engine.match_order(buy);
+        Order buy(i, 100, 100, OrderSide::BUY, OrderType::LIMIT, 0, 1, 0);
+        engine->submit_order(buy, result, 0);
     }
     
     for (int i = NUM_MATCHES / 2; i < NUM_MATCHES; ++i) {
-        Order sell(i, 100, 100, OrderSide::SELL, 0);
+        Order sell(i, 100, 100, OrderSide::SELL, OrderType::LIMIT, 0, 1, 0);
         _mm_lfence();
-        uint64_t start = __rdtsc();
-        auto result = engine.match_order(sell);
-        uint64_t end = __rdtscp(nullptr);
+        uint64_t start = hft::rdtsc();
+        engine->submit_order(sell, result, 0);
+        uint64_t end = hft::rdtscp();
         _mm_lfence();
         match_stats.record(end - start);
     }
     
-    auto md = engine.get_market_data(0);
+    auto md = engine->get_market_data(0);
     
     printf("=== Matching Engine Benchmark ===\n");
     printf("Matches: %lu\n", match_stats.count);

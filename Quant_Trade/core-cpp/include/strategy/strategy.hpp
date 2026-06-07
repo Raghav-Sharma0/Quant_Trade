@@ -1,6 +1,6 @@
 #pragma once
 
-
+#include <optional>
 #include "../common/types.hpp"
 
 namespace hft {
@@ -14,7 +14,7 @@ public:
     Strategy() : spread_threshold(5), order_qty(100) {}
     virtual ~Strategy() = default;
     
-    virtual Order* generate_order(const MarketData& md) = 0;
+    virtual std::optional<Order> generate_order(const MarketData& md) = 0;
 };
 
 class SimpleSpreadStrategy : public Strategy {
@@ -31,25 +31,26 @@ public:
 
     ~SimpleSpreadStrategy() override = default;
 
-    Order* generate_order(const MarketData& md) override {
+    std::optional<Order> generate_order(const MarketData& md) override {
         uint32_t spread = md.best_ask_price - md.best_bid_price;
 
         if (spread < spread_threshold) {
-            return nullptr;
+            return std::nullopt;
         }
-
-        Order* order = new Order();
 
         if (md.best_bid_price > 0) {
-            order->order_id = ++order_counter;
-            order->price = md.best_bid_price - 1;
-            order->quantity = order_qty;
-            order->side = static_cast<uint8_t>(OrderSide::BUY);
-            order->symbol_id = md.symbol_id;
-            order->client_id = client_id;
+            Order order;
+            order.order_id = ++order_counter;
+            order.price = md.best_bid_price - 1;
+            order.quantity = order_qty;
+            order.side = static_cast<uint8_t>(OrderSide::BUY);
+            order.type = static_cast<uint8_t>(OrderType::LIMIT);
+            order.symbol_id = md.symbol_id;
+            order.client_id = client_id;
+            return order;
         }
 
-        return order;
+        return std::nullopt;
     }
 };
 } // namespace hft

@@ -2,14 +2,15 @@
 #include <chrono>
 #include <x86intrin.h>
 #include "../include/common/types.hpp"
+#include "../include/common/cacheline.hpp"
 
 using namespace hft;
 
 uint64_t measure_rdtsc_overhead() {
     _mm_lfence();
-    uint64_t start = __rdtsc();
+    uint64_t start = hft::rdtsc();
     _mm_lfence();
-    uint64_t end = __rdtscp(nullptr);
+    uint64_t end = hft::rdtscp();
     _mm_lfence();
     return end - start;
 }
@@ -27,11 +28,11 @@ int main() {
     for (int i = 0; i < 10000; ++i) {
         Order order;
         _mm_lfence();
-        uint64_t start = __rdtsc();
+        uint64_t start = hft::rdtsc();
         order.order_id = i;
         order.price = 100;
         order.quantity = 10;
-        uint64_t end = __rdtscp(nullptr);
+        uint64_t end = hft::rdtscp();
         _mm_lfence();
         allocation.record(end - start);
     }
