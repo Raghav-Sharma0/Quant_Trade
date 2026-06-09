@@ -6,21 +6,15 @@
 
 namespace hft {
 
-// ============================================================================
-// Fundamental scalar aliases
-// ============================================================================
 using OrderId    = uint64_t;
 using TradeId    = uint64_t;
-using Price      = uint32_t;   // Fixed-point: price in ticks (e.g. price * 100)
+using Price      = uint32_t;
 using Quantity   = uint32_t;
 using SymbolId   = uint16_t;
 using ClientId   = uint32_t;
-using Timestamp  = uint64_t;   // RDTSC or nanoseconds since epoch
+using Timestamp  = uint64_t;
 using SequenceNo = uint64_t;
 
-// ============================================================================
-// Enumerations (compact width)
-// ============================================================================
 enum class OrderSide : uint8_t {
     BUY  = 0,
     SELL = 1
@@ -29,8 +23,8 @@ enum class OrderSide : uint8_t {
 enum class OrderType : uint8_t {
     LIMIT  = 0,
     MARKET = 1,
-    IOC    = 2,   // Immediate-Or-Cancel
-    FOK    = 3    // Fill-Or-Kill
+    IOC    = 2,
+    FOK    = 3 
 };
 
 enum class OrderStatus : uint8_t {
@@ -55,23 +49,20 @@ enum class RejectReason : uint8_t {
     INVALID_QTY        = 8
 };
 
-// ============================================================================
-// Order  (hot-path struct — fits in a single 64-byte cache line)
-// ============================================================================
 struct alignas(64) Order {
-    OrderId   order_id;      //  8 bytes
-    Price     price;         //  4 bytes
-    Quantity  quantity;      //  4 bytes
-    Quantity  filled_qty;    //  4 bytes
-    ClientId  client_id;     //  4 bytes
-    Timestamp timestamp;     //  8 bytes
-    SequenceNo sequence;     //  8 bytes
-    SymbolId  symbol_id;     //  2 bytes
-    uint8_t   side;          //  1 byte  (OrderSide)
-    uint8_t   type;          //  1 byte  (OrderType)
-    uint8_t   status;        //  1 byte  (OrderStatus)
-    uint8_t   reject_reason; //  1 byte  (RejectReason)
-    uint8_t   _pad[14];      // 14 bytes  → total = 64 bytes
+    OrderId   order_id;
+    Price     price;
+    Quantity  quantity;
+    Quantity  filled_qty;
+    ClientId  client_id;
+    Timestamp timestamp;
+    SequenceNo sequence;
+    SymbolId  symbol_id;
+    uint8_t   side;
+    uint8_t   type;
+    uint8_t   status;
+    uint8_t   reject_reason;
+    uint8_t   _pad[14];
 
     Order() noexcept { std::memset(this, 0, sizeof(Order)); }
 
@@ -95,19 +86,16 @@ struct alignas(64) Order {
 };
 static_assert(sizeof(Order) == 64, "Order must be exactly 64 bytes");
 
-// ============================================================================
-// Trade  (generated on each fill — also 64-byte aligned)
-// ============================================================================
 struct alignas(64) Trade {
-    TradeId   trade_id;      //  8
-    OrderId   bid_order_id;  //  8
-    OrderId   ask_order_id;  //  8
-    Price     price;         //  4
-    Quantity  quantity;      //  4
-    Timestamp timestamp;     //  8
-    SequenceNo sequence;     //  8
-    SymbolId  symbol_id;     //  2
-    uint8_t   _pad[14];      // 14 → total = 64
+    TradeId   trade_id;
+    OrderId   bid_order_id;
+    OrderId   ask_order_id;
+    Price     price;
+    Quantity  quantity;
+    Timestamp timestamp;
+    SequenceNo sequence;
+    SymbolId  symbol_id;
+    uint8_t   _pad[14];
 
     Trade() noexcept { std::memset(this, 0, sizeof(Trade)); }
 
@@ -121,24 +109,21 @@ struct alignas(64) Trade {
 };
 static_assert(sizeof(Trade) == 64, "Trade must be exactly 64 bytes");
 
-// ============================================================================
-// ExecutionReport  (sent to clients / risk / recorder)
-// ============================================================================
 struct alignas(64) ExecutionReport {
-    TradeId    trade_id;        //  8
-    OrderId    order_id;        //  8
-    SequenceNo sequence;        //  8
-    Timestamp  timestamp;       //  8
-    Price      executed_price;  //  4
-    Quantity   executed_qty;    //  4
-    Quantity   leaves_qty;      //  4
-    Quantity   cum_qty;         //  4
-    ClientId   client_id;       //  4
-    SymbolId   symbol_id;       //  2
-    uint8_t    status;          //  1  (OrderStatus)
-    uint8_t    side;            //  1  (OrderSide)
-    uint8_t    reject_reason;   //  1  (RejectReason)
-    uint8_t    _pad[7];         //  7 → total = 64
+    TradeId    trade_id;
+    OrderId    order_id;
+    SequenceNo sequence;
+    Timestamp  timestamp;
+    Price      executed_price;
+    Quantity   executed_qty;
+    Quantity   leaves_qty;
+    Quantity   cum_qty;
+    ClientId   client_id;
+    SymbolId   symbol_id;
+    uint8_t    status;
+    uint8_t    side;
+    uint8_t    reject_reason;
+    uint8_t    _pad[7];
 
     ExecutionReport() noexcept { std::memset(this, 0, sizeof(ExecutionReport)); }
 
@@ -199,29 +184,23 @@ struct alignas(64) ExecutionReport {
 };
 static_assert(sizeof(ExecutionReport) == 64, "ExecutionReport must be exactly 64 bytes");
 
-// ============================================================================
-// MarketData  (L1 snapshot, published to market data bus)
-// ============================================================================
 struct alignas(64) MarketData {
-    Price      best_bid_price;   //  4
-    Price      best_ask_price;   //  4
-    Quantity   best_bid_qty;     //  4
-    Quantity   best_ask_qty;     //  4
-    Price      last_trade_price; //  4
-    Quantity   last_trade_qty;   //  4
-    Timestamp  timestamp;        //  8
-    SequenceNo sequence;         //  8
-    SymbolId   symbol_id;        //  2
-    uint8_t    _pad[22];         // 22 → total = 64
+    Price      best_bid_price;
+    Price      best_ask_price;
+    Quantity   best_bid_qty;
+    Quantity   best_ask_qty;
+    Price      last_trade_price;
+    Quantity   last_trade_qty;
+    Timestamp  timestamp;
+    SequenceNo sequence;
+    SymbolId   symbol_id;
+    uint8_t    _pad[22];
 
     MarketData() noexcept { std::memset(this, 0, sizeof(MarketData)); }
     explicit MarketData(SymbolId sym) noexcept : MarketData() { symbol_id = sym; }
 };
 static_assert(sizeof(MarketData) == 64, "MarketData must be exactly 64 bytes");
 
-// ============================================================================
-// RDTSC latency stats helper (header-only, no heap)
-// ============================================================================
 struct LatencyStats {
     uint64_t min_cycles  = ~uint64_t{0};
     uint64_t max_cycles  = 0;
