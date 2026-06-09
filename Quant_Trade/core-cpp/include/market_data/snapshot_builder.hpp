@@ -10,28 +10,12 @@
 
 namespace hft {
 
-// ============================================================================
-// SnapshotBuilder
-//
-// Builds L1 (and optionally L2/L5/L10) snapshots from the order book.
-// Publishes SnapshotEvent to the MarketDataBus on each book change.
-//
-// L1 Snapshot:
-//   best bid price + qty
-//   best ask price + qty
-//   timestamp
-//   sequence
-//
-// L2+ snapshots returned via a stack-provided output buffer — no heap.
-// ============================================================================
-
 struct BookLevel {
     Price    price    = 0;
     Quantity quantity = 0;
     uint32_t count    = 0;
 };
 
-// Up to 10 bid + 10 ask levels
 struct L10Snapshot {
     SymbolId   symbol_id  = 0;
     SequenceNo sequence   = 0;
@@ -49,10 +33,6 @@ public:
         , snapshot_seq_(0)
     {}
 
-    // -------------------------------------------------------------------------
-    // on_book_update — called by matching engine after each order/fill
-    // Publishes an L1 snapshot to the bus.
-    // -------------------------------------------------------------------------
     void on_book_update(const OrderBook& book, Timestamp ts) noexcept {
         const MarketData md = book.snapshot();
 
@@ -63,9 +43,6 @@ public:
             ++snapshot_seq_, ts);
     }
 
-    // -------------------------------------------------------------------------
-    // build_l1 — fill a MarketData struct without publishing
-    // -------------------------------------------------------------------------
     [[nodiscard]] static MarketData build_l1(
         const OrderBook& book, Timestamp ts, SequenceNo seq) noexcept
     {
@@ -75,10 +52,6 @@ public:
         return md;
     }
 
-    // -------------------------------------------------------------------------
-    // build_l10 — deep snapshot (up to 10 levels each side)
-    // Output written into caller-provided L10Snapshot (no heap).
-    // -------------------------------------------------------------------------
     static void build_l10(const OrderBook& book, L10Snapshot& out,
                            Timestamp ts, SequenceNo seq) noexcept {
         out.symbol_id  = book.symbol();
