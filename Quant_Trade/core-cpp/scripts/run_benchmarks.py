@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import subprocess
 import json
 import os
@@ -15,7 +14,6 @@ BENCHMARKS = [
 
 def run_cmd(cmd, cwd=None):
     try:
-        # Run the command and capture output
         result = subprocess.run(
             cmd, 
             shell=True, 
@@ -43,7 +41,6 @@ def parse_benchmark_output(output):
         if not line:
             continue
             
-        # Match section headers like "=== RDTSC Overhead ==="
         header_match = re.match(r"^===\s*(.+?)\s*===$", line)
         if header_match:
             current_section = header_match.group(1).lower().replace(" ", "_")
@@ -52,7 +49,6 @@ def parse_benchmark_output(output):
             
         sections[current_section]["raw"] += line + "\n"
         
-        # Match metrics like "Min: 1.67 ns (5 cycles)"
         metric_match = re.match(r"^(Min|Max|Avg):\s*([0-9.]+)\s*ns\s*\(([0-9.]+)\s*cycles\)", line)
         if metric_match:
             metric_type = metric_match.group(1).lower()
@@ -65,7 +61,6 @@ def parse_benchmark_output(output):
     return sections
 
 def main():
-    # Ensure directories exist
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     build_path = os.path.join(project_root, BUILD_DIR)
     results_path = os.path.join(project_root, RESULTS_DIR)
@@ -102,7 +97,6 @@ def main():
             
         results["benchmarks"][bench.replace("./", "")] = bench_data
 
-    # Generate filename with timestamp
     timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = os.path.join(results_path, f"benchmark_{timestamp_str}.json")
     
