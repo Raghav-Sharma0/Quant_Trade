@@ -6,10 +6,6 @@
 
 namespace hft {
 
-// ============================================================================
-// TradePool — fixed-size pool of Trade objects
-// Capacity = MAX_TRADES (from constants.hpp)
-// ============================================================================
 using TradePool = ObjectPool<Trade, MAX_TRADES>;
 
 } // namespace hft
