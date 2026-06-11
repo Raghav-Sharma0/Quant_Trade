@@ -8,21 +8,6 @@
 
 namespace hft {
 
-// ============================================================================
-// ArenaAllocator
-//
-// A monotonic bump allocator backed by a fixed block of memory.
-// - O(1) allocation
-// - No runtime malloc/free
-// - Thread-unsafe by design (used per-thread or with external lock)
-// - Supports alignment
-// - Supports reset() for bulk deallocation
-//
-// Usage:
-//   alignas(64) char buf[4096];
-//   ArenaAllocator arena(buf, 4096);
-//   auto* p = arena.alloc<MyStruct>();
-// ============================================================================
 class ArenaAllocator {
 public:
     ArenaAllocator() noexcept = default;
@@ -33,18 +18,13 @@ public:
         , offset_(0)
     {}
 
-    // Non-copyable, non-movable (owns external memory view)
     ArenaAllocator(const ArenaAllocator&) = delete;
     ArenaAllocator& operator=(const ArenaAllocator&) = delete;
 
-    // -------------------------------------------------------------------------
-    // Raw allocation: returns aligned pointer or nullptr on OOM
-    // -------------------------------------------------------------------------
     [[nodiscard]] void* alloc_raw(size_t bytes, size_t align = alignof(std::max_align_t)) noexcept {
         assert(base_ != nullptr);
-        assert((align & (align - 1)) == 0); // must be power of 2
+        assert((align & (align - 1)) == 0);
 
-        // Align up
         const size_t aligned_offset = (offset_ + align - 1) & ~(align - 1);
         if (HFT_UNLIKELY(aligned_offset + bytes > capacity_)) {
             return nullptr;
@@ -54,9 +34,6 @@ public:
         return ptr;
     }
 
-    // -------------------------------------------------------------------------
-    // Typed allocation with default construction
-    // -------------------------------------------------------------------------
     template <typename T, typename... Args>
     [[nodiscard]] T* alloc(Args&&... args) noexcept {
         void* raw = alloc_raw(sizeof(T), alignof(T));
@@ -64,9 +41,6 @@ public:
         return ::new (raw) T(static_cast<Args&&>(args)...);
     }
 
-    // -------------------------------------------------------------------------
-    // Typed array allocation (default-initialized)
-    // -------------------------------------------------------------------------
     template <typename T>
     [[nodiscard]] T* alloc_array(size_t count) noexcept {
         void* raw = alloc_raw(sizeof(T) * count, alignof(T));
@@ -76,14 +50,8 @@ public:
         return arr;
     }
 
-    // -------------------------------------------------------------------------
-    // Reset — deallocates everything in O(1)
-    // -------------------------------------------------------------------------
     void reset() noexcept { offset_ = 0; }
 
-    // -------------------------------------------------------------------------
-    // Diagnostics
-    // -------------------------------------------------------------------------
     [[nodiscard]] size_t used()      const noexcept { return offset_; }
     [[nodiscard]] size_t capacity()  const noexcept { return capacity_; }
     [[nodiscard]] size_t remaining() const noexcept { return capacity_ - offset_; }
@@ -94,10 +62,6 @@ private:
     size_t offset_   = 0;
 };
 
-// ============================================================================
-// HeapArena — owns its own heap allocation (for convenience in tests/startup)
-// Uses a single large malloc at construction time; never malloc again.
-// ============================================================================
 class HeapArena {
 public:
     explicit HeapArena(size_t capacity)
