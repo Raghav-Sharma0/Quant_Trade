@@ -6,10 +6,6 @@
 
 namespace hft {
 
-// ============================================================================
-// OrderPool — fixed-size pool of Order objects
-// Capacity = MAX_ORDERS (from constants.hpp)
-// ============================================================================
 using OrderPool = ObjectPool<Order, MAX_ORDERS>;
 
 } // namespace hft
