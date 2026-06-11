@@ -6,38 +6,23 @@
 
 namespace hft {
 
-// ============================================================================
-// OrderNode
-//
-// Intrusive doubly-linked list node.
-// No std::list, no heap allocation per node.
-// Nodes live in a pool (OrderPool) — the pool owns the memory.
-//
-// Layout fits 2 nodes per 3 cache lines (node = 80 bytes).
-// Hot fields (order_id, price, remaining_qty) sit at the front.
-// ============================================================================
 struct alignas(CACHELINE_SIZE) OrderNode {
-    // ------ Intrusive list pointers (8+8 = 16 bytes) ------
     OrderNode* next = nullptr;
     OrderNode* prev = nullptr;
 
-    // ------ Order identity (hot path reads) ------
-    OrderId   order_id    = 0;    //  8
-    Price     price       = 0;    //  4
-    Quantity  orig_qty    = 0;    //  4  original submitted quantity
-    Quantity  remain_qty  = 0;    //  4  remaining unfilled
-    ClientId  client_id   = 0;    //  4
-    Timestamp timestamp   = 0;    //  8  nanoseconds / RDTSC at submission
-    SequenceNo sequence   = 0;    //  8  global sequence number
-    SymbolId  symbol_id   = 0;    //  2
-    uint8_t   side        = 0;    //  1  (OrderSide)
-    uint8_t   type        = 0;    //  1  (OrderType)
-    uint8_t   status      = 0;    //  1  (OrderStatus)
-    uint8_t   _pad[3]     = {};   //  3  → running total = 16+8+4+4+4+4+8+8+2+1+1+1+3 = 64
+    OrderId   order_id    = 0;
+    Price     price       = 0;
+    Quantity  orig_qty    = 0;
+    Quantity  remain_qty  = 0;
+    ClientId  client_id   = 0;
+    Timestamp timestamp   = 0;
+    SequenceNo sequence   = 0;
+    SymbolId  symbol_id   = 0;
+    uint8_t   side        = 0;
+    uint8_t   type        = 0;
+    uint8_t   status      = 0;
+    uint8_t   _pad[3]     = {};
 
-    // -------------------------------------------------------------------------
-    // Populate from an Order (gateway → node)
-    // -------------------------------------------------------------------------
     void from_order(const Order& o) noexcept {
         order_id   = o.order_id;
         price      = o.price;
@@ -53,9 +38,6 @@ struct alignas(CACHELINE_SIZE) OrderNode {
         next = prev = nullptr;
     }
 
-    // -------------------------------------------------------------------------
-    // Write back to Order (for ExecutionReport generation)
-    // -------------------------------------------------------------------------
     void to_order(Order& o) const noexcept {
         o.order_id   = order_id;
         o.price      = price;
