@@ -28,11 +28,13 @@ temp/
 *.swo
 
 build/
+build_debug/
 dist/
 bin/
 out/
 release/
 debug/
+results/
 
 coverage.out
 *.coverprofile
