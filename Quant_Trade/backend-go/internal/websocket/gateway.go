@@ -3,7 +3,7 @@ package websocket
 import (
 	"encoding/json"
 	"net/http"
-	
+
 	"time"
 
 	mdsvc "github.com/anshul/hft/backend/internal/service/marketdata"
@@ -35,7 +35,7 @@ func (g *Gateway) readSubscribeFilter(conn *websocket.Conn) map[string]struct{} 
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
-		return nil // no filter = all symbols
+		return nil
 	}
 	conn.SetReadDeadline(time.Time{})
 
