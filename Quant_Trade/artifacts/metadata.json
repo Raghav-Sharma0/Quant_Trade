@@ -1,0 +1,25 @@
+{
+    "features": [
+        "spread",
+        "microprice",
+        "imbalance",
+        "log_return_5",
+        "log_return_10",
+        "log_return_50",
+        "rolling_vol_20",
+        "ewma_spread_01",
+        "ewma_spread_05",
+        "ewma_spread_10",
+        "ewma_imbalance_01",
+        "ewma_imbalance_05",
+        "ewma_imbalance_10",
+        "ewma_log_ret_01",
+        "ewma_log_ret_05",
+        "ewma_log_ret_10"
+    ],
+    "horizon": 10,
+    "train_start": "0",
+    "train_end": "9999000000",
+    "model_version": "v1",
+    "timestamp": "2026-06-29T00:18:48.992391"
+}
