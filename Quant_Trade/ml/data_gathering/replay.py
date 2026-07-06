@@ -2,23 +2,19 @@
 Replay event recorder — captures orders, fills, cancels, and strategy decisions
 from the exchange simulator for debugging and backtesting.
 
-Kept deliberately separate from the tick recorder:
-  - Different schema, different directory, different WebSocket channel
-  - The ML recorder's only job is tick data
-  - The replay recorder's job is everything else needed to reconstruct sessions
+Kept separate from the tick recorder:
+  - Different schema and directory.
+  - The tick recorder's only job is tick data.
+  - This recorder handles everything needed to reconstruct trading sessions.
 
 Run standalone:
-    python -m ml.data.replay
-
-Or import ReplayRecorder and run alongside MarketDataRecorder in the same
-event loop (see recorder.py).
+    PYTHONPATH=. python -m ml.data_gathering.replay
 
 File layout:
-    ml/data/replay/
-        orders/   orders_{date}_{n:04d}.parquet
-        fills/    fills_{date}_{n:04d}.parquet
-        cancels/  cancels_{date}_{n:04d}.parquet
-        decisions/ decisions_{date}_{n:04d}.parquet
+    {output_dir}/orders/    orders_{YYYYMMDD}_{n:04d}.parquet
+    {output_dir}/fills/     fills_{YYYYMMDD}_{n:04d}.parquet
+    {output_dir}/cancels/   cancels_{YYYYMMDD}_{n:04d}.parquet
+    {output_dir}/decisions/ decisions_{YYYYMMDD}_{n:04d}.parquet
 """
 
 import asyncio
@@ -26,7 +22,6 @@ import json
 import logging
 import os
 import signal
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -38,8 +33,9 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 
 logger = logging.getLogger(__name__)
 
+
 # ------------------------------------------------------------------
-# Schemas — one per event type
+# Event dataclasses
 # ------------------------------------------------------------------
 
 @dataclass
@@ -47,10 +43,10 @@ class OrderEvent:
     timestamp_ns: int
     order_id: str
     symbol: str
-    side: str          # "buy" | "sell"
+    side: str           # "buy" | "sell"
     price: float
     quantity: float
-    order_type: str    # "limit" | "market"
+    order_type: str     # "limit" | "market"
     sequence: int
 
 
@@ -71,7 +67,7 @@ class CancelEvent:
     timestamp_ns: int
     order_id: str
     symbol: str
-    reason: str        # "user" | "expired" | "risk_rejected"
+    reason: str         # "user" | "expired" | "risk_rejected"
     sequence: int
 
 
@@ -79,14 +75,18 @@ class CancelEvent:
 class DecisionEvent:
     timestamp_ns: int
     symbol: str
-    action: str        # "place_order" | "cancel_order" | "hold"
-    side: str          # "buy" | "sell" | ""
+    action: str         # "place_order" | "cancel_order" | "hold"
+    side: str           # "buy" | "sell" | ""
     price: float
     quantity: float
-    ml_signal: float   # buy_prob from ML prediction (0.0 if no ML)
-    reason: str        # e.g. "ml_signal_high" | "spread_too_wide"
+    ml_signal: float    # buy_prob from ML (0.0 if not available)
+    reason: str         # e.g. "ml_signal_high" | "spread_too_wide"
     sequence: int
 
+
+# ------------------------------------------------------------------
+# PyArrow schemas
+# ------------------------------------------------------------------
 
 ORDER_SCHEMA = pa.schema([
     pa.field("timestamp_ns", pa.int64()),
@@ -100,14 +100,14 @@ ORDER_SCHEMA = pa.schema([
 ])
 
 FILL_SCHEMA = pa.schema([
-    pa.field("timestamp_ns",   pa.int64()),
-    pa.field("order_id",       pa.string()),
-    pa.field("symbol",         pa.string()),
-    pa.field("side",           pa.string()),
-    pa.field("fill_price",     pa.float64()),
-    pa.field("fill_qty",       pa.float64()),
-    pa.field("remaining_qty",  pa.float64()),
-    pa.field("sequence",       pa.int64()),
+    pa.field("timestamp_ns",  pa.int64()),
+    pa.field("order_id",      pa.string()),
+    pa.field("symbol",        pa.string()),
+    pa.field("side",          pa.string()),
+    pa.field("fill_price",    pa.float64()),
+    pa.field("fill_qty",      pa.float64()),
+    pa.field("remaining_qty", pa.float64()),
+    pa.field("sequence",      pa.int64()),
 ])
 
 CANCEL_SCHEMA = pa.schema([
@@ -186,40 +186,42 @@ def parse_decision(msg: dict[str, Any]) -> DecisionEvent:
 
 
 # ------------------------------------------------------------------
-# Replay writer — one buffer per event type
+# ReplayWriter — one buffer per event type
 # ------------------------------------------------------------------
+
+# (schema, column-extractor)
+_CONFIGS: dict[str, tuple[pa.Schema, Any]] = {
+    "orders": (ORDER_SCHEMA, lambda e: {
+        "timestamp_ns": [e.timestamp_ns], "order_id": [e.order_id],
+        "symbol": [e.symbol], "side": [e.side], "price": [e.price],
+        "quantity": [e.quantity], "order_type": [e.order_type],
+        "sequence": [e.sequence],
+    }),
+    "fills": (FILL_SCHEMA, lambda e: {
+        "timestamp_ns": [e.timestamp_ns], "order_id": [e.order_id],
+        "symbol": [e.symbol], "side": [e.side], "fill_price": [e.fill_price],
+        "fill_qty": [e.fill_qty], "remaining_qty": [e.remaining_qty],
+        "sequence": [e.sequence],
+    }),
+    "cancels": (CANCEL_SCHEMA, lambda e: {
+        "timestamp_ns": [e.timestamp_ns], "order_id": [e.order_id],
+        "symbol": [e.symbol], "reason": [e.reason],
+        "sequence": [e.sequence],
+    }),
+    "decisions": (DECISION_SCHEMA, lambda e: {
+        "timestamp_ns": [e.timestamp_ns], "symbol": [e.symbol],
+        "action": [e.action], "side": [e.side], "price": [e.price],
+        "quantity": [e.quantity], "ml_signal": [e.ml_signal],
+        "reason": [e.reason], "sequence": [e.sequence],
+    }),
+}
+
 
 class ReplayWriter:
     """
     Buffers replay events in memory and flushes to Parquet.
     One sub-directory per event type, one file per day with rotation.
     """
-
-    _CONFIGS = {
-        "orders":    (ORDER_SCHEMA,    lambda e: {
-            "timestamp_ns": [e.timestamp_ns], "order_id": [e.order_id],
-            "symbol": [e.symbol], "side": [e.side], "price": [e.price],
-            "quantity": [e.quantity], "order_type": [e.order_type],
-            "sequence": [e.sequence],
-        }),
-        "fills":     (FILL_SCHEMA,     lambda e: {
-            "timestamp_ns": [e.timestamp_ns], "order_id": [e.order_id],
-            "symbol": [e.symbol], "side": [e.side], "fill_price": [e.fill_price],
-            "fill_qty": [e.fill_qty], "remaining_qty": [e.remaining_qty],
-            "sequence": [e.sequence],
-        }),
-        "cancels":   (CANCEL_SCHEMA,   lambda e: {
-            "timestamp_ns": [e.timestamp_ns], "order_id": [e.order_id],
-            "symbol": [e.symbol], "reason": [e.reason],
-            "sequence": [e.sequence],
-        }),
-        "decisions": (DECISION_SCHEMA, lambda e: {
-            "timestamp_ns": [e.timestamp_ns], "symbol": [e.symbol],
-            "action": [e.action], "side": [e.side], "price": [e.price],
-            "quantity": [e.quantity], "ml_signal": [e.ml_signal],
-            "reason": [e.reason], "sequence": [e.sequence],
-        }),
-    }
 
     def __init__(
         self,
@@ -233,9 +235,9 @@ class ReplayWriter:
         self.flush_interval_s = flush_interval_s
         self.max_file_rows = max_file_rows
 
-        self._buffers: dict[str, list] = {k: [] for k in self._CONFIGS}
-        self._file_row_count: dict[str, int] = {k: 0 for k in self._CONFIGS}
-        self._file_index: dict[str, int] = {k: 0 for k in self._CONFIGS}
+        self._buffers: dict[str, list] = {k: [] for k in _CONFIGS}
+        self._file_row_count: dict[str, int] = {k: 0 for k in _CONFIGS}
+        self._file_index: dict[str, int] = {k: 0 for k in _CONFIGS}
         self._flush_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
@@ -245,7 +247,7 @@ class ReplayWriter:
     async def stop(self) -> None:
         if self._flush_task:
             self._flush_task.cancel()
-        for event_type in self._CONFIGS:
+        for event_type in _CONFIGS:
             await self._flush(event_type)
         logger.info("replay_writer stopped")
 
@@ -269,7 +271,7 @@ class ReplayWriter:
     async def _periodic_flush(self) -> None:
         while True:
             await asyncio.sleep(self.flush_interval_s)
-            for event_type in self._CONFIGS:
+            for event_type in _CONFIGS:
                 await self._flush(event_type)
 
     async def _flush(self, event_type: str) -> None:
@@ -278,9 +280,8 @@ class ReplayWriter:
             return
 
         events, self._buffers[event_type] = buf, []
-        schema, row_builder = self._CONFIGS[event_type]
+        schema, row_builder = _CONFIGS[event_type]
 
-        # Merge all rows into one dict of lists
         merged: dict[str, list] = {col: [] for col in schema.names}
         for event in events:
             row = row_builder(event)
@@ -288,7 +289,7 @@ class ReplayWriter:
                 merged[col].extend(row[col])
 
         table = pa.table(merged, schema=schema)
-        path = self._get_path(event_type)
+        path = self._current_path(event_type)
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
         if os.path.exists(path):
@@ -296,18 +297,14 @@ class ReplayWriter:
             table = pa.concat_tables([existing, table])
 
         pq.write_table(table, path, compression="snappy")
-
         self._file_row_count[event_type] += len(events)
-        logger.debug(
-            "replay_flushed type=%s rows=%d file=%s",
-            event_type, len(events), path,
-        )
+        logger.debug("replay_flushed type=%s rows=%d file=%s", event_type, len(events), path)
 
         if self._file_row_count[event_type] >= self.max_file_rows:
             self._file_index[event_type] += 1
             self._file_row_count[event_type] = 0
 
-    def _get_path(self, event_type: str) -> str:
+    def _current_path(self, event_type: str) -> str:
         date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
         idx = self._file_index[event_type]
         return os.path.join(
@@ -317,7 +314,7 @@ class ReplayWriter:
 
 
 # ------------------------------------------------------------------
-# Replay recorder — WebSocket subscriber
+# ReplayRecorder — WebSocket subscriber
 # ------------------------------------------------------------------
 
 _PARSERS = {
@@ -330,12 +327,8 @@ _PARSERS = {
 
 class ReplayRecorder:
     """
-    Subscribes to the exchange simulator's replay/event channel and
-    records orders, fills, cancels, and strategy decisions to Parquet.
-
-    The replay channel is typically the same WebSocket as the tick feed
-    but with different message types — or a separate endpoint entirely.
-    Configure via ws_url.
+    Subscribes to the exchange simulator's event channel and records
+    orders, fills, cancels, and strategy decisions to Parquet.
     """
 
     def __init__(
@@ -370,16 +363,13 @@ class ReplayRecorder:
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 if not self._running:
                     break
-                logger.warning(
-                    "replay connection lost: %s — reconnecting in %.1fs", exc, delay
-                )
+                logger.warning("replay connection lost: %s — reconnecting in %.1fs", exc, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.max_reconnect_delay_s)
 
     async def _connect_and_record(self) -> None:
         async with websockets.connect(self.ws_url, ping_interval=20) as ws:
             logger.info("replay_recorder connected")
-            # Subscribe to all replay event types
             await ws.send(json.dumps({
                 "action": "subscribe",
                 "channels": ["orders", "fills", "cancels", "decisions"],
@@ -387,9 +377,9 @@ class ReplayRecorder:
             async for raw_msg in ws:
                 if not self._running:
                     return
-                await self._handle_message(raw_msg)
+                self._handle_message(raw_msg)
 
-    async def _handle_message(self, raw_msg: str) -> None:
+    def _handle_message(self, raw_msg: str) -> None:
         try:
             msg = json.loads(raw_msg)
         except json.JSONDecodeError:
@@ -414,11 +404,10 @@ class ReplayRecorder:
 
 
 # ------------------------------------------------------------------
-# Entry point (run standalone)
+# Entry point
 # ------------------------------------------------------------------
 
 async def main() -> None:
-    import os
     ws_url = os.getenv("EXCHANGE_WS_URL", "ws://localhost:8080/market-data")
     output_dir = os.getenv("REPLAY_DATA_DIR", "ml/data/replay")
     recorder = ReplayRecorder(ws_url=ws_url, output_dir=output_dir)
@@ -426,8 +415,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
+    import logging as _logging
+    _logging.basicConfig(
+        level=_logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     asyncio.run(main())

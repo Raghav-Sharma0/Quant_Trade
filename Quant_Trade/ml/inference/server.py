@@ -1,50 +1,135 @@
-import grpc
-from concurrent import futures
-import time
-import logging
+"""
+gRPC inference server for the HFT market-maker ML model.
 
-import prediction_pb2
-import prediction_pb2_grpc
-from predictor import Predictor
+Serves predictions on port 50051.  The C++ core and Go backend call this
+service asynchronously (predictions are cached — the hot path never waits here).
+
+Run from project root:
+    PYTHONPATH=. python ml/inference/server.py
+
+Environment variables:
+    ML_MODEL_DIR   path to artifact directory (default: artifacts)
+    ML_GRPC_PORT   port to listen on          (default: 50051)
+    ML_WORKERS     gRPC thread pool size       (default: 4)
+
+Proto contract (prediction.proto):
+    PredictionRequest  { string symbol, repeated double features, int64 timestamp_ns }
+    PredictionResponse { string symbol, double price_direction, double predicted_value, int64 timestamp_ns }
+
+Features are sent by C++ in FEATURE_NAMES order.  However, because the C++
+side owns the raw order book state, it sends bid/ask/bid_sz/ask_sz (first 4
+elements of the features array) and this server runs the streaming pipeline
+to compute the full feature vector.  If C++ sends the full pre-computed
+feature vector (len >= 16), it is used directly.
+"""
+
+import logging
+import os
+import sys
+from concurrent import futures
+
+import grpc
+
+# The pb2 stubs live in the same package directory.
+# sys.path manipulation is needed because protoc generates files that import
+# each other with bare names.  We add the inference package dir so those
+# relative imports resolve without modifying the generated stubs.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import prediction_pb2          # noqa: E402  (generated, must come after path fix)
+import prediction_pb2_grpc     # noqa: E402
+
+from ml.inference.predictor import Predictor  # noqa: E402
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+_N_FEATURES = 16   # len(FEATURE_NAMES)
+_N_RAW      = 4    # bid, ask, bid_sz, ask_sz
+
 
 class PredictionService(prediction_pb2_grpc.PredictionServiceServicer):
-    def __init__(self, model_dir="artifacts/"):
+    """gRPC servicer that wraps the Predictor."""
+
+    def __init__(self, model_dir: str) -> None:
+        logger.info("loading predictor from %s", model_dir)
         self.predictor = Predictor(model_dir)
+        logger.info("predictor ready")
 
     def Predict(self, request, context):
-        try:
-            # Assuming C++ sends [bid, ask, bid_sz, ask_sz] in features array
-            if len(request.features) < 4:
-                context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Expected at least 4 features: bid, ask, bid_sz, ask_sz")
-                
-            bid = request.features[0]
-            ask = request.features[1]
-            bid_sz = request.features[2]
-            ask_sz = request.features[3]
-            
-            prob, direction = self.predictor.predict(bid, ask, bid_sz, ask_sz)
-            
-            return prediction_pb2.PredictionResponse(
-                symbol=request.symbol,
-                price_direction=direction,
-                predicted_value=prob,
-                timestamp_ns=request.timestamp_ns
-            )
-        except Exception as e:
-            logging.error(f"Prediction failed: {e}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
+        """
+        Accept either:
+          - 4 features  [bid, ask, bid_sz, ask_sz]  → streaming pipeline computes the rest
+          - 16 features  pre-computed full feature vector
+        """
+        n = len(request.features)
+        if n == _N_RAW:
+            bid, ask, bid_sz, ask_sz = (float(f) for f in request.features)
+            buy_prob, direction = self.predictor.predict(bid, ask, bid_sz, ask_sz)
 
-def serve():
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-    prediction_pb2_grpc.add_PredictionServiceServicer_to_server(PredictionService(), server)
-    server.add_insecure_port('[::]:50051')
+        elif n >= _N_FEATURES:
+            # C++ sent the full feature vector — use it directly (advanced mode).
+            import pandas as pd
+            from ml.feature_engineering.features import FEATURE_NAMES
+            feats = [float(f) for f in request.features[:_N_FEATURES]]
+            X = pd.DataFrame([feats], columns=FEATURE_NAMES)
+            buy_prob = float(self.predictor.model.predict_proba(X)[0][1])
+            direction = 1 if buy_prob > 0.5 else 0
+
+        else:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"Expected {_N_RAW} (raw) or {_N_FEATURES} (full) features, got {n}",
+            )
+            return None
+
+        logger.debug(
+            "predict symbol=%s buy_prob=%.4f direction=%d",
+            request.symbol, buy_prob, direction,
+        )
+
+        return prediction_pb2.PredictionResponse(
+            symbol=request.symbol,
+            price_direction=float(direction),
+            predicted_value=buy_prob,
+            timestamp_ns=request.timestamp_ns,
+        )
+
+    def HealthCheck(self, request, context):
+        """Simple liveness check so the Go client can detect ML degradation."""
+        return prediction_pb2.PredictionResponse(
+            symbol="health",
+            price_direction=0.0,
+            predicted_value=1.0,
+            timestamp_ns=0,
+        )
+
+
+def serve() -> None:
+    model_dir = os.getenv("ML_MODEL_DIR", "artifacts")
+    port      = int(os.getenv("ML_GRPC_PORT", "50051"))
+    workers   = int(os.getenv("ML_WORKERS", "4"))
+
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=workers))
+    prediction_pb2_grpc.add_PredictionServiceServicer_to_server(
+        PredictionService(model_dir), server
+    )
+    server.add_insecure_port(f"[::]:{port}")
     server.start()
-    print("Inference Server started on port 50051.")
+    logger.info("inference server listening on :%d (workers=%d)", port, workers)
+
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
-        server.stop(0)
+        logger.info("shutting down")
+        server.stop(grace=0)
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+
+if __name__ == "__main__":
     serve()

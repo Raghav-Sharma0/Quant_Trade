@@ -1,14 +1,16 @@
 """
-Market data recorder — the main entry point for Phase 1.
+Market data recorder — Phase 1 entry point.
 
-Connects to the exchange simulator's WebSocket feed, validates each tick,
+Connects to the exchange simulator WebSocket feed, validates each tick,
 and writes to Parquet via a buffered writer.
 
 Run with:
-    python -m ml.data.recorder
+    PYTHONPATH=. python -m ml.data_gathering.recorder
 
-Or from project root:
-    EXCHANGE_WS_URL=ws://localhost:8080/market-data python -m ml.data.recorder
+Or set environment variables:
+    EXCHANGE_WS_URL=ws://localhost:8080/market-data  \\
+    ML_DATA_DIR=ml/data/raw                          \\
+    PYTHONPATH=. python -m ml.data_gathering.recorder
 """
 
 import asyncio
@@ -16,15 +18,14 @@ import json
 import logging
 import signal
 import time
-from typing import Optional
 
 import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
-from .config import DataConfig
-from .schema import Tick, from_ws_message
-from .validator import TickValidator
-from .writer import ParquetWriter
+from ml.data_gathering.config import DataConfig
+from ml.data_gathering.schema import Tick, from_ws_message
+from ml.data_gathering.validator import TickValidator
+from ml.data_gathering.writer import ParquetWriter
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,7 +39,7 @@ class MarketDataRecorder:
     """
     Subscribes to the exchange simulator WebSocket and records ticks to Parquet.
 
-    Reconnects automatically with exponential backoff.
+    Reconnects with exponential backoff on connection failures.
     Handles SIGINT / SIGTERM gracefully — flushes all buffers before exiting.
     """
 
@@ -51,11 +52,10 @@ class MarketDataRecorder:
             flush_interval_s=config.flush_interval_s,
             max_file_ticks=config.max_file_ticks,
         )
-
         self._running = False
-        self._ticks_received = 0
-        self._ticks_since_last_stat = 0
-        self._last_stat_time = time.monotonic()
+        self._ticks_received: int = 0
+        self._ticks_since_stat: int = 0
+        self._last_stat_time: float = time.monotonic()
 
     # ------------------------------------------------------------------
     # Public
@@ -65,7 +65,6 @@ class MarketDataRecorder:
         self._running = True
         await self.writer.start()
 
-        # Register graceful shutdown on SIGINT / SIGTERM
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda: asyncio.ensure_future(self._shutdown()))
@@ -80,13 +79,11 @@ class MarketDataRecorder:
         while self._running:
             try:
                 await self._connect_and_record()
-                delay = self.config.reconnect_delay_s  # reset on clean exit
+                delay = self.config.reconnect_delay_s  # reset on clean disconnect
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 if not self._running:
                     break
-                logger.warning(
-                    "connection lost: %s — reconnecting in %.1fs", exc, delay
-                )
+                logger.warning("connection lost: %s — reconnecting in %.1fs", exc, delay)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, self.config.max_reconnect_delay_s)
             except Exception as exc:
@@ -100,53 +97,44 @@ class MarketDataRecorder:
 
     async def _connect_and_record(self) -> None:
         logger.info("connecting to %s", self.config.ws_url)
-
         async with websockets.connect(
             self.config.ws_url,
             ping_interval=20,
             ping_timeout=10,
-            max_size=2**20,   # 1MB max message size
+            max_size=2 ** 20,
         ) as ws:
             logger.info("connected")
-
-            # Send subscription message if filtering by symbol
             if self.config.symbols:
-                sub_msg = json.dumps({
-                    "action": "subscribe",
-                    "symbols": self.config.symbols,
-                })
-                await ws.send(sub_msg)
+                await ws.send(json.dumps({"action": "subscribe", "symbols": self.config.symbols}))
                 logger.info("subscribed to symbols=%s", self.config.symbols)
 
             async for raw_msg in ws:
                 if not self._running:
                     return
-                await self._handle_message(raw_msg)
+                self._handle_message(raw_msg)
 
-    async def _handle_message(self, raw_msg: str) -> None:
+    def _handle_message(self, raw_msg: str) -> None:
         try:
             msg = json.loads(raw_msg)
         except json.JSONDecodeError:
-            logger.debug("non-json message received, skipping")
             return
 
-        # Ignore non-tick messages (heartbeats, acks, etc.)
         if msg.get("type") != "tick":
             return
 
         try:
-            tick = from_ws_message(msg)
+            tick: Tick = from_ws_message(msg)
         except (KeyError, TypeError, ValueError) as exc:
-            logger.warning("malformed tick message: %s — %s", exc, msg)
+            logger.warning("malformed tick: %s — %s", exc, msg)
             return
 
         result = self.validator.validate(tick)
         if not result.valid:
-            return  # logged inside validator
+            return
 
         self.writer.add(tick)
         self._ticks_received += 1
-        self._ticks_since_last_stat += 1
+        self._ticks_since_stat += 1
         self._maybe_log_stats()
 
     def _maybe_log_stats(self) -> None:
@@ -154,19 +142,14 @@ class MarketDataRecorder:
         elapsed = now - self._last_stat_time
         if elapsed < self.config.stats_interval_s:
             return
-
-        rate = self._ticks_since_last_stat / elapsed
-        logger.info(
-            "stats total_ticks=%d rate=%.0f ticks/s",
-            self._ticks_received, rate,
-        )
+        rate = self._ticks_since_stat / elapsed
+        logger.info("stats total_ticks=%d rate=%.0f ticks/s", self._ticks_received, rate)
         self.validator.report()
-
-        self._ticks_since_last_stat = 0
+        self._ticks_since_stat = 0
         self._last_stat_time = now
 
     async def _shutdown(self) -> None:
-        logger.info("shutdown signal received — flushing buffers")
+        logger.info("shutdown received — flushing buffers")
         self._running = False
         await self.writer.stop()
         logger.info("shutdown complete total_ticks=%d", self._ticks_received)

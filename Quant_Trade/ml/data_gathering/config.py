@@ -1,38 +1,40 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
 @dataclass
 class DataConfig:
+    """Configuration for the market data recorder, loaded from environment variables."""
+
     # Exchange simulator WebSocket endpoint
     ws_url: str = "ws://localhost:8080/market-data"
 
-    # Where Parquet files are written
+    # Root directory for raw Parquet tick files
     output_dir: str = "ml/data/raw"
 
-    # Flush buffer to disk after this many ticks ...
+    # Flush buffer to disk after this many ticks …
     buffer_size: int = 10_000
-    # ... or after this many seconds, whichever comes first
+    # … or after this many seconds — whichever comes first
     flush_interval_s: float = 5.0
 
     # Rotate to a new Parquet file after this many ticks
     max_file_ticks: int = 500_000
 
-    # None = record all symbols; list = filter to these only
-    symbols: Optional[list] = None
+    # None → record all symbols; non-empty list → filter to these only
+    symbols: Optional[list[str]] = None
 
-    # Reconnection backoff: starts at reconnect_delay_s,
-    # doubles on each failure, caps at max_reconnect_delay_s
+    # Reconnection backoff: starts at reconnect_delay_s, doubles each failure,
+    # caps at max_reconnect_delay_s
     reconnect_delay_s: float = 1.0
     max_reconnect_delay_s: float = 30.0
 
-    # Log throughput stats every N seconds
+    # How often to log throughput statistics
     stats_interval_s: float = 10.0
 
     @classmethod
     def from_env(cls) -> "DataConfig":
-        """Load config from environment variables with sensible defaults."""
+        """Build a DataConfig from environment variables with sensible defaults."""
         symbols_env = os.getenv("RECORD_SYMBOLS")
         return cls(
             ws_url=os.getenv("EXCHANGE_WS_URL", "ws://localhost:8080/market-data"),

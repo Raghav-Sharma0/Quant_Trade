@@ -1,12 +1,13 @@
 """
 Tick data schema.
 
-Every field here must match what the exchange simulator sends over WebSocket.
-If Anshul changes the message format, update from_ws_message() and ARROW_SCHEMA together.
+Every field must match what the exchange simulator sends over WebSocket.
+If the exchange message format changes, update from_ws_message() and ARROW_SCHEMA together.
 """
 
 from dataclasses import dataclass, asdict
 from typing import Any
+
 import pyarrow as pa
 
 
@@ -23,9 +24,8 @@ class Tick:
     sequence: int       # monotonically increasing sequence number from exchange
 
     # Set to True by the validator when one or more sequence numbers were
-    # missing just before this tick arrived. Ticks within N steps of a
-    # seq_gap=True row must be masked out during label creation (Phase 3)
-    # because their forward window may cross a data hole.
+    # missing just before this tick.  Phase 3 masks labels whose forward
+    # window crosses a seq_gap=True row to prevent look-ahead contamination.
     seq_gap: bool = False
 
     @property
@@ -38,7 +38,7 @@ class Tick:
 
     @property
     def microprice(self) -> float:
-        """Size-weighted mid — better estimate of fair value than simple mid."""
+        """Size-weighted mid — a better estimate of fair value than simple mid."""
         total = self.bid_sz + self.ask_sz
         if total == 0:
             return self.mid
@@ -48,8 +48,8 @@ class Tick:
         return asdict(self)
 
 
-# Pyarrow schema — must stay in sync with Tick fields above.
-# Column order here determines column order in Parquet files.
+# PyArrow schema — must stay in sync with Tick fields above.
+# Column order here determines column order in all Parquet files.
 ARROW_SCHEMA = pa.schema([
     pa.field("timestamp_ns", pa.int64()),
     pa.field("symbol",       pa.string()),
@@ -60,17 +60,15 @@ ARROW_SCHEMA = pa.schema([
     pa.field("last_price",   pa.float64()),
     pa.field("volume",       pa.float64()),
     pa.field("sequence",     pa.int64()),
-    # True when sequence numbers were missing just before this tick.
-    # Use this column to mask labels during Phase 3.
     pa.field("seq_gap",      pa.bool_()),
 ])
 
 
 def from_ws_message(msg: dict[str, Any]) -> Tick:
     """
-    Parse a raw WebSocket message dict into a Tick.
+    Parse a raw WebSocket JSON dict into a Tick.
 
-    Expected message format from exchange simulator:
+    Expected exchange simulator message format:
     {
         "type": "tick",
         "symbol": "BTC-USD",
@@ -83,7 +81,8 @@ def from_ws_message(msg: dict[str, Any]) -> Tick:
         "volume": 1234.0,
         "sequence": 42
     }
-    seq_gap is always False here — it gets set by the validator.
+
+    seq_gap is always False here — the validator sets it after sequence checking.
     """
     return Tick(
         timestamp_ns=int(msg["timestamp_ns"]),

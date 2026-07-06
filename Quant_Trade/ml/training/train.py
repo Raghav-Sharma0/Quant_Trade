@@ -1,139 +1,232 @@
-import os
+"""
+Training script for the HFT market-maker ML model.
+
+Run from project root:
+    PYTHONPATH=. python ml/training/train.py
+
+Artifacts written to artifacts/:
+    model.pkl       — trained XGBoost classifier
+    pipe.pkl        — fitted BatchFeaturePipeline
+    metadata.json   — feature names, horizon, data range, model version
+
+If no Parquet data is found in data_dir, synthetic data is generated
+automatically so the entire pipeline can be smoke-tested without real data.
+"""
+
 import json
-import joblib
-import pandas as pd
-import numpy as np
-import xgboost as xgb
+import logging
+import os
 from datetime import datetime
+
+import joblib
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.metrics import precision_score, roc_auc_score
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import roc_auc_score, precision_score
+
 from ml.feature_engineering.features import BatchFeaturePipeline, FEATURE_NAMES
 
-def load_data(data_dir):
-    """Load and concatenate all parquet files in the given directory."""
-    if not os.path.exists(data_dir):
-        raise ValueError(f"Directory not found: {data_dir}")
-        
-    files = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.parquet')]
-    if not files:
-        raise ValueError(f"No parquet files found in {data_dir}")
-    dfs = [pd.read_parquet(f) for f in sorted(files)]
-    return pd.concat(dfs, ignore_index=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
-def create_labels(df, horizon=10, alpha=1.0, fees=0.0):
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+def load_data(data_dir: str) -> pd.DataFrame:
     """
-    Create cost-adjusted binary labels.
-    label = 1 if (mid_{t+N} - mid_t) > alpha * spread + fees else 0
+    Concatenate all Parquet files found recursively under data_dir.
+
+    Raises FileNotFoundError if data_dir does not exist or contains no files.
+    """
+    if not os.path.isdir(data_dir):
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    files: list[str] = []
+    for root, _, fnames in os.walk(data_dir):
+        for fname in sorted(fnames):
+            if fname.endswith(".parquet"):
+                files.append(os.path.join(root, fname))
+
+    if not files:
+        raise FileNotFoundError(f"No Parquet files found under {data_dir}")
+
+    logger.info("loading %d Parquet file(s) from %s", len(files), data_dir)
+    dfs = [pd.read_parquet(f) for f in files]
+    df = pd.concat(dfs, ignore_index=True)
+    df = df.sort_values("timestamp_ns").reset_index(drop=True)
+    logger.info("loaded %d rows", len(df))
+    return df
+
+
+def _make_synthetic_data(n: int = 10_000) -> pd.DataFrame:
+    """Generate synthetic tick data for pipeline smoke-testing."""
+    logger.warning("no real data found — generating %d synthetic ticks", n)
+    rng = np.random.default_rng(42)
+    bid = 100.0 + np.cumsum(rng.standard_normal(n) * 0.1)
+    spread = rng.uniform(0.01, 0.05, n)
+    return pd.DataFrame({
+        "timestamp_ns": np.arange(n, dtype=np.int64) * 1_000_000,
+        "bid":          bid,
+        "ask":          bid + spread,
+        "bid_sz":       rng.uniform(1.0, 10.0, n),
+        "ask_sz":       rng.uniform(1.0, 10.0, n),
+        "last_price":   bid + spread / 2.0,
+        "volume":       np.cumsum(rng.uniform(0.1, 1.0, n)),
+        "sequence":     np.arange(n, dtype=np.int64),
+        "seq_gap":      np.zeros(n, dtype=bool),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Label creation
+# ---------------------------------------------------------------------------
+
+def create_labels(
+    df: pd.DataFrame,
+    horizon: int = 10,
+    alpha: float = 1.0,
+    fees: float = 0.0,
+) -> pd.Series:
+    """
+    Cost-adjusted binary label.
+
+    label_t = 1  if  (mid_{t+horizon} − mid_t) > alpha × spread_t + fees
+              0  otherwise
+
+    Rows where seq_gap=True falls anywhere in the forward window are masked
+    to NaN — the label spans a data hole and cannot be trusted.
     """
     if "mid" not in df.columns:
+        df = df.copy()
         df["mid"] = (df["bid"] + df["ask"]) / 2.0
     if "spread" not in df.columns:
         df["spread"] = df["ask"] - df["bid"]
-        
+
     future_mid = df["mid"].shift(-horizon)
-    price_change = future_mid - df["mid"]
     threshold = alpha * df["spread"] + fees
-    
-    label = (price_change > threshold).astype(int)
-    
-    # Mask rows near seq_gap
-    if "seq_gap" in df.columns:
-        # If any seq_gap is True in the forward window, the label is untrustworthy
-        gap_in_forward = df["seq_gap"].shift(-horizon).rolling(window=horizon, min_periods=1).max() > 0
-        label.loc[gap_in_forward] = np.nan
-        
+    label = (future_mid - df["mid"] > threshold).astype(float)
+
+    # Mask labels where a seq_gap appears in the forward window
+    if "seq_gap" in df.columns and df["seq_gap"].any():
+        gap_in_forward = (
+            df["seq_gap"]
+            .shift(-horizon, fill_value=False)
+            .rolling(window=horizon, min_periods=1)
+            .max()
+            .astype(bool)
+        )
+        label[gap_in_forward] = float("nan")
+
+    # Last `horizon` rows have no valid future mid — mask them too
+    label.iloc[-horizon:] = float("nan")
+
     return label
 
-def train_model(data_dir="data/", model_dir="artifacts/"):
-    print("Loading data...")
+
+# ---------------------------------------------------------------------------
+# Training
+# ---------------------------------------------------------------------------
+
+def train_model(
+    data_dir: str = "ml/data/raw",
+    model_dir: str = "artifacts",
+    horizon: int = 10,
+) -> None:
+    # 1. Load data
     try:
         df = load_data(data_dir)
-    except ValueError:
-        print("Mocking data for training due to missing parquet files...")
-        # Create dummy data for training pipeline testing
-        np.random.seed(42)
-        n = 10000
-        df = pd.DataFrame({
-            "timestamp_ns": np.arange(n) * 1_000_000,
-            "bid": 100 + np.cumsum(np.random.randn(n) * 0.1),
-            "ask": 0,
-            "bid_sz": np.random.uniform(1, 10, n),
-            "ask_sz": np.random.uniform(1, 10, n),
-            "seq_gap": False
-        })
-        df["ask"] = df["bid"] + np.random.uniform(0.01, 0.05, n)
-    
-    print("Engineering features...")
+    except FileNotFoundError:
+        df = _make_synthetic_data()
+
+    # 2. Feature engineering
+    logger.info("engineering features ...")
     pipe = BatchFeaturePipeline()
     X = pipe.fit_transform(df)
-    
-    print("Creating labels...")
-    y = create_labels(df, horizon=10, alpha=1.0)
-    
-    # Drop rows with NaN (due to lookback/forward windows or gaps)
-    valid_idx = X.notna().all(axis=1) & y.notna()
-    X = X[valid_idx]
-    y = y[valid_idx]
-    
+
+    # 3. Label creation
+    logger.info("creating labels (horizon=%d) ...", horizon)
+    y = create_labels(df, horizon=horizon)
+
+    # 4. Drop rows with NaN in features OR labels
+    valid = X.notna().all(axis=1) & y.notna()
+    X, y = X[valid], y[valid]
+
     if len(X) == 0:
-        raise ValueError("No valid rows remaining after feature/label creation.")
-    
-    print(f"Training on {len(X)} samples. Positive class ratio: {y.mean():.4f}")
-    
-    tscv = TimeSeriesSplit(n_splits=5)
-    
-    print("Evaluating baseline (Always 0)...")
-    base_preds = np.zeros(len(y))
-    print(f"Baseline Precision: {precision_score(y, base_preds, zero_division=0):.4f}")
-    
-    print("Training XGBoost...")
-    model = xgb.XGBClassifier(
-        n_estimators=100, 
-        max_depth=4, 
-        learning_rate=0.05, 
-        eval_metric='logloss',
-        random_state=42
+        raise RuntimeError("No valid rows remain after feature/label creation.")
+
+    pos_rate = float(y.mean())
+    logger.info("training set: %d samples, positive rate=%.4f", len(X), pos_rate)
+
+    # 5. Naive baselines (establish the floor before touching the real model)
+    always_zero = np.zeros(len(y))
+    always_one  = np.ones(len(y))
+    logger.info(
+        "baseline always-zero  precision=%.4f",
+        precision_score(y, always_zero, zero_division=0),
     )
-    
-    # Walk-forward CV
-    for i, (train_idx, val_idx) in enumerate(tscv.split(X)):
+    logger.info(
+        "baseline always-one   precision=%.4f",
+        precision_score(y, always_one, zero_division=0),
+    )
+
+    # 6. Walk-forward cross-validation
+    tscv = TimeSeriesSplit(n_splits=5)
+    model = xgb.XGBClassifier(
+        n_estimators=200,
+        max_depth=4,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        eval_metric="logloss",
+        random_state=42,
+        verbosity=0,
+    )
+
+    logger.info("walk-forward cross-validation ...")
+    for fold, (train_idx, val_idx) in enumerate(tscv.split(X), start=1):
         X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
         X_val, y_val = X.iloc[val_idx], y.iloc[val_idx]
-        
-        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
-        preds = model.predict_proba(X_val)[:, 1]
-        auc = roc_auc_score(y_val, preds)
-        pred_classes = (preds > 0.5).astype(int)
-        prec = precision_score(y_val, pred_classes, zero_division=0)
-        print(f"Fold {i+1} | AUC-ROC: {auc:.4f} | Precision: {prec:.4f}")
 
-    # Retrain on full data
-    print("Retraining on full dataset...")
+        model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+        proba = model.predict_proba(X_val)[:, 1]
+        auc = roc_auc_score(y_val, proba)
+        prec = precision_score(y_val, (proba > 0.5).astype(int), zero_division=0)
+        logger.info("fold %d  AUC-ROC=%.4f  precision@0.5=%.4f", fold, auc, prec)
+
+    # 7. Retrain on full dataset
+    logger.info("retraining on full dataset ...")
     model.fit(X, y)
-    
-    # Ensure artifacts dir exists
+
+    # 8. Save artifacts (model + pipe + metadata must always be saved together)
     os.makedirs(model_dir, exist_ok=True)
-    
-    # Save artifacts
+
     model_path = os.path.join(model_dir, "model.pkl")
-    pipe_path = os.path.join(model_dir, "pipe.pkl")
-    meta_path = os.path.join(model_dir, "metadata.json")
-    
+    pipe_path  = os.path.join(model_dir, "pipe.pkl")
+    meta_path  = os.path.join(model_dir, "metadata.json")
+
     joblib.dump(model, model_path)
     joblib.dump(pipe, pipe_path)
-    
+
     metadata = {
-        "features": FEATURE_NAMES,
-        "horizon": 10,
-        "train_start": str(df["timestamp_ns"].min()),
-        "train_end": str(df["timestamp_ns"].max()),
+        "features":      FEATURE_NAMES,
+        "horizon":       horizon,
+        "train_start":   str(df["timestamp_ns"].iloc[0]),
+        "train_end":     str(df["timestamp_ns"].iloc[-1]),
         "model_version": "v1",
-        "timestamp": datetime.now().isoformat()
+        "timestamp":     datetime.now().isoformat(),
     }
-    with open(meta_path, 'w') as f:
-        json.dump(metadata, f, indent=4)
-        
-    print(f"Saved artifacts to {model_dir}")
+    with open(meta_path, "w") as fh:
+        json.dump(metadata, fh, indent=4)
+
+    logger.info("artifacts saved to %s  (model, pipe, metadata)", model_dir)
+
 
 if __name__ == "__main__":
     train_model()
