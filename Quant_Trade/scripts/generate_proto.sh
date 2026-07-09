@@ -18,9 +18,9 @@ export PATH=$PATH:$HOME/go/bin
 # Generate Go stubs
 protoc -Iproto \
   --go_out=backend-go \
-  --go_opt=module=github.com/anshul/Quant_Trade/backend \
+  --go_opt=module=github.com/anshul/hft/backend \
   --go-grpc_out=backend-go \
-  --go-grpc_opt=module=github.com/anshul/Quant_Trade/backend \
+  --go-grpc_opt=module=github.com/anshul/hft/backend \
   proto/*.proto
 
 echo "Generating Python protobuf/gRPC stubs..."
