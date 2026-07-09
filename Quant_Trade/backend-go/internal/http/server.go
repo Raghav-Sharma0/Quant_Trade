@@ -33,8 +33,6 @@ func (s *Server) Start() {
 	gw := websocket.NewGateway(s.svc, s.logger)
 	mux.HandleFunc("/ws/market-data", gw.HandleMarketData)
 	mux.HandleFunc("/ws/trades", gw.HandleTrades)
-	mux.HandleFunc("/ws/sample-data", gw.ServeMarketData)
-	mux.HandleFunc("/ws/sample-trades", gw.ServeTrades)
 
 
 	mux.HandleFunc("/health", s.handleHealth)

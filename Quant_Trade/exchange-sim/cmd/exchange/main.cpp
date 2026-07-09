@@ -20,6 +20,7 @@
 #include "../../generators/order_generator.hpp"
 #include "../../market_data/snapshot_publisher.hpp"
 #include "../../market_data/trade_publisher.hpp"
+#include "../../market_data/ws_publisher.hpp"
 #include "../../simulator/simulation_clock.hpp"
 #include "../../simulator/event_scheduler.hpp"
 
@@ -34,6 +35,7 @@
 #include <string>
 #include <chrono>
 #include <memory>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -44,13 +46,15 @@ static void print_usage(const char* prog) {
         "  %s --replay  <csv_file> [--speed <multiplier>]\n"
         "  %s --synth   [--duration <seconds>] [--symbol <id>]\n"
         "               [--spread <ticks>] [--noise-interval-us <us>]\n"
+        "               [--ws-port <port>]\n"
         "\n"
         "Options:\n"
         "  --speed               Replay speed multiplier (default 1.0, 0=max)\n"
         "  --duration            Synthetic sim duration in seconds (default 10)\n"
         "  --symbol              Symbol id (default 0)\n"
         "  --spread              Market-maker half-spread in ticks (default 5)\n"
-        "  --noise-interval-us   Noise trader period in us (default 500)\n",
+        "  --noise-interval-us   Noise trader period in us (default 500)\n"
+        "  --ws-port             WebSocket broadcast port (default 8080, 0=off)\n",
         prog, prog);
 }
 
@@ -88,7 +92,8 @@ static int run_replay(const std::string& csv_path, double speed)
 static int run_synth(hft::SymbolId symbol_id,
                      uint32_t      half_spread,
                      uint64_t      noise_interval_us,
-                     uint64_t      duration_sec)
+                     uint64_t      duration_sec,
+                     int           ws_port)
 {
     std::printf(
         "=== SYNTH MODE  symbol=%u  spread=+/-%u  noise=%llu us  duration=%llu s ===\n",
@@ -102,25 +107,44 @@ static int run_synth(hft::SymbolId symbol_id,
     hft::SimulationClock clock;
     hft::EventScheduler  scheduler;
 
-    // -- Snapshot publisher (prints every 1000th) ----------------------------
+    // -- WebSocket publisher -------------------------------------------------
+    // Symbol map for JSON: symbol_id (uint16) -> string name
+    std::unordered_map<uint16_t, std::string> sym_map;
+    sym_map[static_cast<uint16_t>(symbol_id)] = "AAPL"; // matches dev.yaml
+
+    hft::WsPublisher ws_pub(ws_port);
+    if (ws_port > 0) {
+        ws_pub.start();
+    }
+
+    // -- Snapshot publisher --------------------------------------------------
     hft::SnapshotPublisher snap_pub;
-    snap_pub.subscribe([](const hft::MarketData& md) {
+    snap_pub.subscribe([&ws_pub, &sym_map, ws_port](const hft::MarketData& md) {
         static uint64_t cnt = 0;
+        const uint64_t now = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
         if (++cnt % 1000 == 0) {
-            std::printf("[SNAP] #%llu  bid=%u/%u  ask=%u/%u  last=%u\n",
+            std::printf("[SNAP] #%llu  bid=%u/%u  ask=%u/%u  last=%u  ws_clients=%zu\n",
                 static_cast<unsigned long long>(cnt),
                 md.best_bid_price, md.best_bid_qty,
                 md.best_ask_price, md.best_ask_qty,
-                md.last_trade_price);
+                md.last_trade_price,
+                ws_port > 0 ? ws_pub.client_count() : 0);
+        }
+        if (ws_port > 0) {
+            ws_pub.publish_tick(md, sym_map, now);
         }
     });
 
-    // -- Trade counter -------------------------------------------------------
+    // -- Trade publisher -----------------------------------------------------
     uint64_t trade_count = 0;
     hft::TradePublisher trade_pub;
-    trade_pub.subscribe([&trade_count](const hft::Trade& t) {
+    trade_pub.subscribe([&trade_count, &ws_pub, ws_port](const hft::Trade& t) {
         ++trade_count;
-        (void)t;
+        if (ws_port > 0) {
+            ws_pub.publish_trade(t);
+        }
     });
 
     // -- Market maker --------------------------------------------------------
@@ -227,6 +251,7 @@ int main(int argc, char* argv[])
     hft::SymbolId symbol_id   = 0;
     uint32_t      half_spread  = 5;
     uint64_t      noise_us     = 500;
+    int           ws_port      = 8080;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -238,6 +263,7 @@ int main(int argc, char* argv[])
         else if (arg == "--symbol" && i + 1 < argc)           { symbol_id = static_cast<hft::SymbolId>(std::atoi(argv[++i])); }
         else if (arg == "--spread" && i + 1 < argc)           { half_spread = static_cast<uint32_t>(std::atoi(argv[++i])); }
         else if (arg == "--noise-interval-us" && i + 1 < argc){ noise_us = static_cast<uint64_t>(std::atoll(argv[++i])); }
+        else if (arg == "--ws-port" && i + 1 < argc)          { ws_port = std::atoi(argv[++i]); }
         else if (arg == "--help" || arg == "-h")               { print_usage(argv[0]); return 0; }
         else {
             std::fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
@@ -247,7 +273,7 @@ int main(int argc, char* argv[])
     }
 
     if      (mode == "replay") return run_replay(csv_path, speed);
-    else if (mode == "synth")  return run_synth(symbol_id, half_spread, noise_us, duration_sec);
+    else if (mode == "synth")  return run_synth(symbol_id, half_spread, noise_us, duration_sec, ws_port);
     else {
         std::fprintf(stderr, "Error: must specify --replay or --synth\n");
         print_usage(argv[0]);

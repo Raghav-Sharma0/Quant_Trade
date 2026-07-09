@@ -1,18 +1,15 @@
 package websocket
 
 import (
-
+	"net/http"
 	"sync"
 	"time"
-"net/http"
-	"go.uber.org/zap"
-	mdsvc "github.com/anshul/hft/backend/internal/service/marketdata"
+
 	"github.com/anshul/hft/backend/internal/hub"
-
+	mdsvc "github.com/anshul/hft/backend/internal/service/marketdata"
 	"github.com/gorilla/websocket"
-
+	"go.uber.org/zap"
 )
-
 
 func (g *Gateway) HandleTrades(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -29,25 +26,28 @@ func (g *Gateway) HandleTrades(w http.ResponseWriter, r *http.Request) {
 	tradeChan := g.svc.TradeHub.Subscribe()
 	defer g.svc.TradeHub.Unsubscribe(tradeChan)
 
+	var writeMu sync.Mutex
+	done := make(chan struct{})
+	go g.pingLoop(conn, done, &writeMu)
+
 	for {
-		trade, ok := <-tradeChan
-		if !ok {
+		select {
+		case <-done:
 			return
-		}
+		case trade, ok := <-tradeChan:
+			if !ok {
+				return
+			}
 
-		if !mdsvc.MatchesFilter(trade.Symbol, filter) {
-			continue
-		}
+			if !mdsvc.MatchesFilter(trade.Symbol, filter) {
+				continue
+			}
 
-		data, err := g.svc.MarshalTrade(trade)
-		if err != nil {
-			g.logger.Error("Failed to marshal trade", zap.Error(err))
-			continue
-		}
-
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			g.logger.Info("Client disconnected from /ws/trades", zap.String("remote", r.RemoteAddr))
-			return
+			if err := g.writeTrade(conn, trade, &writeMu); err != nil {
+				g.logger.Info("Client disconnected from /ws/trades", zap.String("remote", r.RemoteAddr), zap.Error(err))
+				close(done)
+				return
+			}
 		}
 	}
 }
@@ -63,7 +63,7 @@ func (g *Gateway) writeTrade(conn *websocket.Conn, trade *hub.Trade, mu *sync.Mu
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
-func (g *Gateway) pingLoop(conn *websocket.Conn, done <-chan struct{}, mu *sync.Mutex) {
+func (g *Gateway) pingLoop(conn *websocket.Conn, done chan struct{}, mu *sync.Mutex) {
 	ticker := time.NewTicker(20 * time.Second)
 	defer ticker.Stop()
 	for {

@@ -37,6 +37,8 @@ type ParquetWriter struct {
 	flushTicker    *time.Ticker
 	running        bool
 	totalFlushed   int64
+	flushQueue     chan map[string][]ParquetTick
+	wg             sync.WaitGroup
 }
 
 func NewParquetWriter(cfg config.StorageConfig, logger *zap.Logger) *ParquetWriter {
@@ -47,6 +49,7 @@ func NewParquetWriter(cfg config.StorageConfig, logger *zap.Logger) *ParquetWrit
 		currentPart:  make(map[string]int),
 		logger:       logger,
 		stopChan:     make(chan struct{}),
+		flushQueue:   make(chan map[string][]ParquetTick, 1000),
 	}
 }
 
@@ -58,6 +61,10 @@ func (w *ParquetWriter) Start() {
 	}
 	w.running = true
 	w.mu.Unlock()
+
+	// Start background writer worker
+	w.wg.Add(1)
+	go w.writerWorker()
 
 	w.flushTicker = time.NewTicker(time.Duration(w.cfg.FlushIntervalS * float64(time.Second)))
 	go func() {
@@ -85,15 +92,19 @@ func (w *ParquetWriter) Stop() {
 		w.flushTicker.Stop()
 	}
 	close(w.stopChan)
+	close(w.flushQueue)
 
+	// Wait for background worker to flush queue
+	w.wg.Wait()
 
-	w.Flush()
+	// Final sync flush
+	w.FlushSync()
 }
 
+// Add appends a tick to the in-memory buffer.
+// Locking is minimal: it only locks to append to the map/slice.
 func (w *ParquetWriter) Add(tick *marketdata.Tick) {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	pt := ParquetTick{
 		TimestampNs: tick.TimestampNs,
 		Symbol:      tick.Symbol,
@@ -110,27 +121,71 @@ func (w *ParquetWriter) Add(tick *marketdata.Tick) {
 	w.buffers[tick.Symbol] = append(w.buffers[tick.Symbol], pt)
 	w.totalFlushed++
 
-
 	var totalBuffered int
 	for _, buf := range w.buffers {
 		totalBuffered += len(buf)
 	}
 
 	if totalBuffered >= w.cfg.BufferSize {
-		go w.Flush()
+		w.triggerFlush()
+	}
+	w.mu.Unlock()
+}
+
+// Flush triggers an asynchronous flush of all buffers.
+func (w *ParquetWriter) Flush() {
+	w.mu.Lock()
+	w.triggerFlush()
+	w.mu.Unlock()
+}
+
+// triggerFlush extracts buffers and pushes them to the queue without holding the lock.
+// Caller MUST hold w.mu lock.
+func (w *ParquetWriter) triggerFlush() {
+	snapshot := make(map[string][]ParquetTick)
+	for symbol, ticks := range w.buffers {
+		if len(ticks) > 0 {
+			snapshot[symbol] = ticks
+			w.buffers[symbol] = nil
+		}
+	}
+
+	if len(snapshot) > 0 {
+		select {
+		case w.flushQueue <- snapshot:
+		default:
+			w.logger.Warn("ParquetWriter flush queue full, blocking till free space available")
+			w.flushQueue <- snapshot
+		}
 	}
 }
 
-func (w *ParquetWriter) Flush() {
+// FlushSync performs a synchronous flush (used during shutdown).
+func (w *ParquetWriter) FlushSync() {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
+	snapshot := make(map[string][]ParquetTick)
 	for symbol, ticks := range w.buffers {
-		if len(ticks) == 0 {
-			continue
+		if len(ticks) > 0 {
+			snapshot[symbol] = ticks
+			w.buffers[symbol] = nil
 		}
+	}
+	w.mu.Unlock()
 
+	if len(snapshot) > 0 {
+		w.processFlushSnapshot(snapshot)
+	}
+}
 
+func (w *ParquetWriter) writerWorker() {
+	defer w.wg.Done()
+	for snapshot := range w.flushQueue {
+		w.processFlushSnapshot(snapshot)
+	}
+}
+
+func (w *ParquetWriter) processFlushSnapshot(snapshot map[string][]ParquetTick) {
+	for symbol, ticks := range snapshot {
 		byDate := make(map[string][]ParquetTick)
 		for _, t := range ticks {
 			dateStr := time.Unix(0, t.TimestampNs).UTC().Format("20060102")
@@ -147,15 +202,11 @@ func (w *ParquetWriter) Flush() {
 				)
 			}
 		}
-
-
-		w.buffers[symbol] = nil
 	}
 }
 
 func (w *ParquetWriter) writeToParquet(symbol, dateStr string, ticks []ParquetTick) error {
 	key := fmt.Sprintf("%s_%s", symbol, dateStr)
-
 
 	dir := filepath.Join(w.cfg.OutputDir, symbol, dateStr)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -165,14 +216,8 @@ func (w *ParquetWriter) writeToParquet(symbol, dateStr string, ticks []ParquetTi
 	partIdx := w.currentPart[key]
 	filePath := filepath.Join(dir, fmt.Sprintf("part_%04d.parquet", partIdx))
 
-if err:=w.writeFreshParquet(filePath, ticks); err != nil {
-	return err
-}
-
-	
 	var existingTicks []ParquetTick
 	if _, err := os.Stat(filePath); err == nil {
-	
 		existingTicks, err = w.readParquetFile(filePath)
 		if err != nil {
 			w.logger.Warn("Failed to read existing Parquet file for append, creating new one", zap.Error(err))
@@ -183,21 +228,18 @@ if err:=w.writeFreshParquet(filePath, ticks); err != nil {
 	allTicks := append(existingTicks, ticks...)
 	w.ticksWritten[key] = len(allTicks)
 
-
 	if len(allTicks) > w.cfg.MaxFileTicks {
-	
 		keepTicks := allTicks[:w.cfg.MaxFileTicks]
 		spillTicks := allTicks[w.cfg.MaxFileTicks:]
 
-if err:=w.writeFreshParquet(filePath, keepTicks); err != nil {
-	return err
-}
+		if err := w.writeFreshParquet(filePath, keepTicks); err != nil {
+			return err
+		}
 
 		w.currentPart[key]++
 		partIdx = w.currentPart[key]
 		filePath = filepath.Join(dir, fmt.Sprintf("part_%04d.parquet", partIdx))
 		w.ticksWritten[key] = len(spillTicks)
-
 
 		return w.writeFreshParquet(filePath, spillTicks)
 	}
@@ -250,4 +292,3 @@ func (w *ParquetWriter) TotalFlushed() int64 {
 	defer w.mu.Unlock()
 	return w.totalFlushed
 }
-

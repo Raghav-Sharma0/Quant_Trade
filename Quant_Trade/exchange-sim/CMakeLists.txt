@@ -5,8 +5,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Release-optimised by default; add -g if you need debug symbols
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native -fno-exceptions -fno-rtti")
+# Release-optimised; ws_publisher uses std::thread so we need pthreads and exceptions
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native -fno-rtti")
+find_package(Threads REQUIRED)
 
 # ---- core-cpp (header-only interface library) --------------------------------
 set(CORE_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../core-cpp")
@@ -24,7 +25,7 @@ target_include_directories(exchange_sim PRIVATE
     "${CORE_CPP_DIR}/include"
 )
 
-target_link_libraries(exchange_sim PRIVATE hft_core)
+target_link_libraries(exchange_sim PRIVATE hft_core Threads::Threads)
 
 # ---- install (optional) ------------------------------------------------------
 install(TARGETS exchange_sim DESTINATION bin)

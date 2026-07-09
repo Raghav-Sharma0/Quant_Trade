@@ -3,6 +3,7 @@ package ingestor
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	"github.com/anshul/hft/backend/generated/proto/marketdata"
 	"github.com/anshul/hft/backend/internal/config"
@@ -36,7 +37,7 @@ func NewIngestor(cfg config.ExchangeConfig, symbolMap map[uint16]string,
 }
 
 // Run starts the WSClient and begins processing messages from the exchange simulator.
-// This is the main loop — called as a goroutine from main.go.
+// Uses multiple concurrent worker threads to distribute JSON parsing load.
 func (n *Ingestor) Run(ctx context.Context) {
 	client := NewWSClient(n.cfg, n.logger)
 	msgChan := client.Start(ctx) // connects to ws://localhost:8080/market-data
@@ -45,37 +46,40 @@ func (n *Ingestor) Run(ctx context.Context) {
 		zap.String("url", n.cfg.WSURL),
 	)
 
-	for {
-		select {
-		case <-ctx.Done():
-			n.validator.Report()
-			n.logger.Info("Ingestor stopped")
-			return
-		case msg, ok := <-msgChan:
-			if !ok {
-				return
+	numWorkers := 8
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg, ok := <-msgChan:
+					if !ok {
+						return
+					}
+					n.processMessage(msg)
+				}
 			}
-			n.processMessage(msg)
-		}
+		}()
 	}
+
+	wg.Wait()
+	n.validator.Report()
+	n.logger.Info("Ingestor stopped")
 }
 
 func (n *Ingestor) processMessage(msg []byte) {
-	var meta struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(msg, &meta); err != nil {
-		n.logger.Debug("Non-JSON message received", zap.Error(err))
+	var raw RawExchangeMessage
+	if err := json.Unmarshal(msg, &raw); err != nil {
+		n.logger.Debug("Non-JSON or invalid message received", zap.Error(err))
 		return
 	}
 
-	switch meta.Type {
+	switch raw.Type {
 	case "tick":
-		raw, err := ParseRawTick(msg)
-		if err != nil {
-			n.logger.Error("Failed to parse raw exchange tick", zap.Error(err))
-			return
-		}
 		symbolStr, exists := n.symbolMap[raw.SymbolID]
 		if !exists {
 			n.logger.Warn("Tick with unknown SymbolID", zap.Uint16("symbol_id", raw.SymbolID))
@@ -101,11 +105,6 @@ func (n *Ingestor) processMessage(msg []byte) {
 		n.hub.Broadcast(tick)
 
 	case "trade":
-		raw, err := ParseRawTrade(msg)
-		if err != nil {
-			n.logger.Error("Failed to parse raw exchange trade", zap.Error(err))
-			return
-		}
 		symbolStr, exists := n.symbolMap[raw.SymbolID]
 		if !exists {
 			n.logger.Warn("Trade with unknown SymbolID", zap.Uint16("symbol_id", raw.SymbolID))

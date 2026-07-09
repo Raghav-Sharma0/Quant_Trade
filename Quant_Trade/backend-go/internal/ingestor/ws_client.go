@@ -24,35 +24,36 @@ type RawExchangeTick struct {
 	Sequence       int64  `json:"sequence"`
 }
 
+type RawExchangeMessage struct {
+	Type           string `json:"type"`
+	SymbolID       uint16 `json:"symbol_id"`
+	TimestampNs    int64  `json:"timestamp_ns"`
+	BestBidPrice   uint32 `json:"bid"`
+	BestAskPrice   uint32 `json:"ask"`
+	BestBidQty     uint32 `json:"bid_sz"`
+	BestAskQty     uint32 `json:"ask_sz"`
+	LastTradePrice uint32 `json:"last_price"`
+	Volume         uint32 `json:"volume"`
+	TradeID        uint64 `json:"trade_id"`
+	Price          uint32 `json:"price"`
+	Quantity       uint32 `json:"quantity"`
+	BidOrderID     uint64 `json:"bid_order_id"`
+	AskOrderID     uint64 `json:"ask_order_id"`
+	Sequence       int64  `json:"sequence"`
+}
+
 type WSClient struct {
 	cfg        config.ExchangeConfig
 	logger     *zap.Logger
 	msgChan    chan []byte
 	disconnect chan struct{}
 }
-type RawExchangeTrade struct {
-	Type        string `json:"type"`
-	SymbolID    uint16 `json:"symbol_id"`
-	TimestampNs int64  `json:"timestamp_ns"`
-	TradeID     uint64 `json:"trade_id"`
-	Price       uint32 `json:"price"`
-	Quantity    uint32 `json:"quantity"`
-	BidOrderID  uint64 `json:"bid_order_id"`
-	AskOrderID  uint64 `json:"ask_order_id"`
-	Sequence    int64  `json:"sequence"`
-}
-
-func ParseRawTrade(data []byte) (*RawExchangeTrade, error) {
-	var t RawExchangeTrade
-	err := json.Unmarshal(data, &t)
-	return &t, err
-}
 
 func NewWSClient(cfg config.ExchangeConfig, logger *zap.Logger) *WSClient {
 	return &WSClient{
 		cfg:        cfg,
 		logger:     logger,
-		msgChan:    make(chan []byte, 10000),
+		msgChan:    make(chan []byte, 50000),
 		disconnect: make(chan struct{}),
 	}
 }
