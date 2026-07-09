@@ -1,28 +1,70 @@
-graph TD
-    subgraph C++ Exchange Simulator
-        ME[Matching Engine] -->|Quotes| MM[Market Maker Agent]
-        ME -->|Orders| NT[Noise Trader Agent]
-        ME -->|Executions/Quotes| WSP[WebSocket Publisher :8080]
-    end
+```mermaid
+flowchart LR
 
-    subgraph Go Backend Server
-        WSC[WebSocket Client] <-- Connects to :8080 --- WSP
-        WSC -->|Raw JSON Queue| Workers[8x Concurrent Ingestion Workers]
-        Workers -->|Parse & Validate| VAL[Tick Validator]
-        Workers -->|Async Queue| PW[Parquet Storage Writer]
-        Workers -->|Valid Ticks/Trades| HUB[Broadcast Hub]
-        HUB -->|WS Gateway :8081| WSG[WebSocket Gateway]
-        HUB -->|gRPC Server :9090| GRPC[gRPC Market Data Service]
-    end
+%% ==============================
+%% GO BACKEND
+%% ==============================
+subgraph GO["Go Backend Server"]
+    direction TB
 
-    subgraph Python ML Pipeline
-        REC[Data Recorder] <-- Subscribe to :8081 --- WSG
-        REC -->|Store Training Data| PAR[Parquet Files]
-        
-        INF[Inference Server :50051] -->|Load XGBoost Model| ML[model.pkl]
-    end
+    WSC["WebSocket Client<br/>Market Feed"]
+    WSP["WebSocket Server<br/>:8080"]
 
-    subgraph C++ Strategy Engine
-        STRAT[SimpleSpreadStrategy] -->|gRPC Query| INF
-        STRAT -->|Execution Orders| ME
-    end
+    ING["8× Concurrent<br/>Ingestion Workers"]
+    VAL["Tick Validator"]
+    HUB["Broadcast Hub"]
+
+    PQ["Parquet Writer"]
+
+    GW["WebSocket Gateway<br/>:8081"]
+    GRPC["gRPC Market Data Server<br/>:9090"]
+
+    WSC <-->|Raw JSON| WSP
+    WSP --> ING
+    ING --> VAL
+    VAL --> HUB
+    ING --> PQ
+
+    HUB --> GW
+    HUB --> GRPC
+end
+
+%% ==============================
+%% PYTHON ML PIPELINE
+%% ==============================
+subgraph PY["Python ML Pipeline"]
+    direction TB
+
+    REC["Data Recorder"]
+    PAR["Training Dataset<br/>Parquet Files"]
+
+    INF["Inference Server<br/>:50051"]
+
+    MODEL["XGBoost Model<br/>model.pkl"]
+
+    GW -->|WebSocket| REC
+    REC --> PAR
+
+    MODEL --> INF
+end
+
+%% ==============================
+%% C++ STRATEGY ENGINE
+%% ==============================
+subgraph CPP["C++ Trading Engine"]
+    direction TB
+
+    STRAT["Simple Spread Strategy"]
+    EXEC["Execution Engine"]
+
+    STRAT -->|gRPC Inference| INF
+    STRAT -->|Trade Orders| EXEC
+end
+
+%% ==============================
+%% DATA FLOW
+%% ==============================
+
+PQ -. Historical Data .-> PAR
+GRPC -. Live Market Data .-> STRAT
+```
