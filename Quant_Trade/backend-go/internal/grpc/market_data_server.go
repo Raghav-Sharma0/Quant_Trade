@@ -15,13 +15,13 @@ import (
 
 type Server struct {
 	marketdata.UnimplementedMarketDataServiceServer
-	port       int
-	hub        *hub.Hub
-	reader     *storage.ParquetReader
-	writer     *storage.ParquetWriter
-	logger     *zap.Logger
-	server     *grpc.Server
-	startTime  time.Time
+	port      int
+	hub       *hub.Hub
+	reader    *storage.ParquetReader
+	writer    *storage.ParquetWriter
+	logger    *zap.Logger
+	server    *grpc.Server
+	startTime time.Time
 }
 
 func NewServer(port int, h *hub.Hub, r *storage.ParquetReader, w *storage.ParquetWriter, logger *zap.Logger) *Server {
@@ -64,7 +64,6 @@ func (s *Server) StreamTicks(req *marketdata.StreamTicksRequest, stream marketda
 	tickChan := s.hub.Subscribe()
 	defer s.hub.Unsubscribe(tickChan)
 
-	// Create a lookup map for filtering symbols
 	filterMap := make(map[string]struct{})
 	for _, sym := range req.Symbols {
 		filterMap[sym] = struct{}{}
@@ -80,7 +79,6 @@ func (s *Server) StreamTicks(req *marketdata.StreamTicksRequest, stream marketda
 				return nil
 			}
 
-		
 			if len(filterMap) > 0 {
 				if _, ok := filterMap[tick.Symbol]; !ok {
 					continue
@@ -99,7 +97,6 @@ func (s *Server) StreamTicks(req *marketdata.StreamTicksRequest, stream marketda
 	}
 }
 
-// GetHistoricalTicks implements historical queries over Parquet storage
 func (s *Server) GetHistoricalTicks(ctx context.Context, req *marketdata.GetHistoricalTicksRequest) (*marketdata.GetHistoricalTicksResponse, error) {
 	s.logger.Info("Received historical ticks query",
 		zap.String("symbol", req.Symbol),
@@ -120,7 +117,6 @@ func (s *Server) GetHistoricalTicks(ctx context.Context, req *marketdata.GetHist
 	}, nil
 }
 
-// HealthCheck returns server runtime diagnostics
 func (s *Server) HealthCheck(ctx context.Context, req *marketdata.HealthCheckRequest) (*marketdata.HealthCheckResponse, error) {
 	uptime := time.Since(s.startTime).Seconds()
 	ticksIngested := s.hub.TotalBroadcasts()
