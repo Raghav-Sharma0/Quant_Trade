@@ -1,70 +1,54 @@
-```mermaid
 flowchart LR
 
-%% ==============================
-%% GO BACKEND
-%% ==============================
+EX["Market Data Exchange"]
+
 subgraph GO["Go Backend Server"]
-    direction TB
+direction TB
 
-    WSC["WebSocket Client<br/>Market Feed"]
-    WSP["WebSocket Server<br/>:8080"]
+WS["WebSocket Server :8080"]
+ING["8x Concurrent Ingestion Workers"]
+VAL["Tick Validator"]
+HUB["Broadcast Hub"]
+PW["Parquet Writer"]
 
-    ING["8× Concurrent<br/>Ingestion Workers"]
-    VAL["Tick Validator"]
-    HUB["Broadcast Hub"]
+WSG["WebSocket Gateway :8081"]
+GRPC["gRPC Market Data Service :9090"]
 
-    PQ["Parquet Writer"]
+WS --> ING
+ING --> VAL
+VAL --> HUB
+ING --> PW
+HUB --> WSG
+HUB --> GRPC
 
-    GW["WebSocket Gateway<br/>:8081"]
-    GRPC["gRPC Market Data Server<br/>:9090"]
-
-    WSC <-->|Raw JSON| WSP
-    WSP --> ING
-    ING --> VAL
-    VAL --> HUB
-    ING --> PQ
-
-    HUB --> GW
-    HUB --> GRPC
 end
 
-%% ==============================
-%% PYTHON ML PIPELINE
-%% ==============================
 subgraph PY["Python ML Pipeline"]
-    direction TB
+direction TB
 
-    REC["Data Recorder"]
-    PAR["Training Dataset<br/>Parquet Files"]
+REC["Data Recorder"]
+DATA["Training Dataset (Parquet)"]
 
-    INF["Inference Server<br/>:50051"]
+INF["Inference Server :50051"]
+MODEL["XGBoost Model"]
 
-    MODEL["XGBoost Model<br/>model.pkl"]
+REC --> DATA
+MODEL --> INF
 
-    GW -->|WebSocket| REC
-    REC --> PAR
-
-    MODEL --> INF
 end
 
-%% ==============================
-%% C++ STRATEGY ENGINE
-%% ==============================
-subgraph CPP["C++ Trading Engine"]
-    direction TB
+subgraph CPP["C++ Strategy Engine"]
+direction TB
 
-    STRAT["Simple Spread Strategy"]
-    EXEC["Execution Engine"]
+STRAT["Simple Spread Strategy"]
+EXEC["Execution Engine"]
 
-    STRAT -->|gRPC Inference| INF
-    STRAT -->|Trade Orders| EXEC
+STRAT --> INF
+STRAT --> EXEC
+
 end
 
-%% ==============================
-%% DATA FLOW
-%% ==============================
-
-PQ -. Historical Data .-> PAR
-GRPC -. Live Market Data .-> STRAT
-```
+EX --> WS
+WSG --> REC
+GRPC --> STRAT
+PW -.-> DATA
