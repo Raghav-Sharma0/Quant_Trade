@@ -7,8 +7,8 @@ from typing import Optional
 class DataConfig:
     """Configuration for the market data recorder, loaded from environment variables."""
 
-    # Exchange simulator WebSocket endpoint
-    ws_url: str = "ws://localhost:8080/market-data"
+    # Go backend WebSocket gateway endpoint
+    ws_url: str = "ws://localhost:8081/ws/market-data"
 
     # Root directory for raw Parquet tick files
     output_dir: str = "ml/data/raw"
@@ -37,7 +37,7 @@ class DataConfig:
         """Build a DataConfig from environment variables with sensible defaults."""
         symbols_env = os.getenv("RECORD_SYMBOLS")
         return cls(
-            ws_url=os.getenv("EXCHANGE_WS_URL", "ws://localhost:8080/market-data"),
+            ws_url=os.getenv("EXCHANGE_WS_URL", "ws://localhost:8081/ws/market-data"),
             output_dir=os.getenv("ML_DATA_DIR", "ml/data/raw"),
             buffer_size=int(os.getenv("BUFFER_SIZE", "10000")),
             flush_interval_s=float(os.getenv("FLUSH_INTERVAL_S", "5.0")),
