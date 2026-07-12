@@ -2,10 +2,8 @@ package ingestor
 
 import (
 	"context"
-	"encoding/json"
-	"sync"
+	"time"
 
-	"github.com/anshul/hft/backend/generated/proto/marketdata"
 	"github.com/anshul/hft/backend/internal/config"
 	"github.com/anshul/hft/backend/internal/hub"
 	"github.com/anshul/hft/backend/internal/storage"
@@ -13,113 +11,56 @@ import (
 )
 
 type Ingestor struct {
-	cfg       config.ExchangeConfig
-	symbolMap map[uint16]string
-	hub       *hub.Hub
-	tradeHub  *hub.TradeHub
-	writer    *storage.ParquetWriter
-	validator *TickValidator
-	logger    *zap.Logger
+	cfg        config.ExchangeConfig
+	symbolMap  map[uint16]string
+	hub        *hub.Hub
+	tradeHub   *hub.TradeHub
+	writer     *storage.ParquetWriter
+	validator  *TickValidator
+	logger     *zap.Logger
+	ringBuffer *RingBuffer
+	breaker    *CircuitBreaker
+	dispatcher *Dispatcher
 }
 
 func NewIngestor(cfg config.ExchangeConfig, symbolMap map[uint16]string,
 	h *hub.Hub, th *hub.TradeHub, w *storage.ParquetWriter, logger *zap.Logger) *Ingestor {
 	validator := NewTickValidator(500.0, 5.0, 0.0, logger)
+	
+	// Create high-performance pipeline components
+	rb := NewRingBuffer(131072) // 128k power-of-two size
+	cb := NewCircuitBreaker(5, 10*time.Second, logger)
+	dispatcher := NewDispatcher(rb, validator, w, h, th, logger)
+
 	return &Ingestor{
-		cfg:       cfg,
-		symbolMap: symbolMap,
-		hub:       h,
-		tradeHub:  th,
-		writer:    w,
-		validator: validator,
-		logger:    logger,
+		cfg:        cfg,
+		symbolMap:  symbolMap,
+		hub:        h,
+		tradeHub:   th,
+		writer:     w,
+		validator:  validator,
+		logger:     logger,
+		ringBuffer: rb,
+		breaker:    cb,
+		dispatcher: dispatcher,
 	}
 }
 
-// Run starts the WSClient and begins processing messages from the exchange simulator.
-// Uses multiple concurrent worker threads to distribute JSON parsing load.
+// Run starts the WSClient and Dispatcher.
 func (n *Ingestor) Run(ctx context.Context) {
-	client := NewWSClient(n.cfg, n.logger)
-	msgChan := client.Start(ctx) // connects to ws://localhost:8080/market-data
-
-	n.logger.Info("Ingestor started, consuming from exchange simulator",
+	n.logger.Info("Ingestor starting high-performance pipeline",
 		zap.String("url", n.cfg.WSURL),
 	)
 
-	numWorkers := 8
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case msg, ok := <-msgChan:
-					if !ok {
-						return
-					}
-					n.processMessage(msg)
-				}
-			}
-		}()
-	}
+	// Start the Fan-Out Dispatcher
+	n.dispatcher.Start(ctx)
 
-	wg.Wait()
+	// Start the Binary WS Client (pushes directly to RingBuffer)
+	client := NewWSClient(n.cfg, n.logger, n.ringBuffer, n.breaker)
+	client.Start(ctx, n.symbolMap)
+
+	<-ctx.Done()
+	
 	n.validator.Report()
 	n.logger.Info("Ingestor stopped")
-}
-
-func (n *Ingestor) processMessage(msg []byte) {
-	var raw RawExchangeMessage
-	if err := json.Unmarshal(msg, &raw); err != nil {
-		n.logger.Debug("Non-JSON or invalid message received", zap.Error(err))
-		return
-	}
-
-	switch raw.Type {
-	case "tick":
-		symbolStr, exists := n.symbolMap[raw.SymbolID]
-		if !exists {
-			n.logger.Warn("Tick with unknown SymbolID", zap.Uint16("symbol_id", raw.SymbolID))
-			return
-		}
-		tick := &marketdata.Tick{
-			TimestampNs: raw.TimestampNs,
-			Symbol:      symbolStr,
-			Bid:         float64(raw.BestBidPrice),
-			Ask:         float64(raw.BestAskPrice),
-			BidSz:       float64(raw.BestBidQty),
-			AskSz:       float64(raw.BestAskQty),
-			LastPrice:   float64(raw.LastTradePrice),
-			Volume:      float64(raw.Volume),
-			Sequence:    raw.Sequence,
-			SeqGap:      false,
-		}
-		res := n.validator.Validate(tick)
-		if !res.Valid {
-			return
-		}
-		n.writer.Add(tick)
-		n.hub.Broadcast(tick)
-
-	case "trade":
-		symbolStr, exists := n.symbolMap[raw.SymbolID]
-		if !exists {
-			n.logger.Warn("Trade with unknown SymbolID", zap.Uint16("symbol_id", raw.SymbolID))
-			return
-		}
-		trade := &hub.Trade{
-			TimestampNs: raw.TimestampNs,
-			Symbol:      symbolStr,
-			TradeID:     raw.TradeID,
-			Price:       float64(raw.Price),
-			Quantity:    float64(raw.Quantity),
-			BidOrderID:  raw.BidOrderID,
-			AskOrderID:  raw.AskOrderID,
-			Sequence:    raw.Sequence,
-		}
-		n.tradeHub.Broadcast(trade)
-	}
 }

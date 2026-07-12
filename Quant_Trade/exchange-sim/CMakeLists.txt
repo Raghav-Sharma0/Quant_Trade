@@ -9,6 +9,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2 -march=native -fno-rtti")
 find_package(Threads REQUIRED)
 
+# gRPC & Protobuf for prediction_client
+find_package(Protobuf REQUIRED)
+find_package(gRPC REQUIRED)
+
 # ---- core-cpp (header-only interface library) --------------------------------
 set(CORE_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../core-cpp")
 
@@ -25,7 +29,7 @@ target_include_directories(exchange_sim PRIVATE
     "${CORE_CPP_DIR}/include"
 )
 
-target_link_libraries(exchange_sim PRIVATE hft_core Threads::Threads)
+target_link_libraries(exchange_sim PRIVATE hft_core Threads::Threads gRPC::grpc++ protobuf::libprotobuf)
 
 # ---- install (optional) ------------------------------------------------------
 install(TARGETS exchange_sim DESTINATION bin)

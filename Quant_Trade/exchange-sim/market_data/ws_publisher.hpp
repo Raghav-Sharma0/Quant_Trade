@@ -2,22 +2,8 @@
 // exchange-sim/market_data/ws_publisher.hpp
 //
 // Zero-dependency single-header WebSocket server (RFC 6455) that broadcasts
-// every MarketData snapshot and Trade as a JSON message to all connected
+// every MarketData snapshot and Trade as a BINARY message to all connected
 // clients.
-//
-// Usage in main.cpp:
-//   WsPublisher ws_pub(8080);
-//   ws_pub.start();                           // spawns accept thread
-//   snap_pub.subscribe([&](const MarketData& md){ ws_pub.publish_tick(md, sym_map); });
-//   trade_pub.subscribe([&](const Trade& t){     ws_pub.publish_trade(t, sym_map); });
-//
-// JSON tick format (matches what Go ingestor expects):
-//   {"type":"tick","symbol_id":0,"timestamp_ns":…,"bid":…,"ask":…,
-//    "bid_sz":…,"ask_sz":…,"last_price":…,"volume":…,"sequence":…}
-//
-// JSON trade format:
-//   {"type":"trade","symbol_id":0,"timestamp_ns":…,"trade_id":…,
-//    "price":…,"quantity":…,"bid_order_id":…,"ask_order_id":…,"sequence":…}
 // =============================================================================
 #pragma once
 
@@ -31,7 +17,6 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
-#include <sstream>
 
 // POSIX sockets
 #include <sys/socket.h>
@@ -41,10 +26,8 @@
 #include <poll.h>
 
 // SHA-1 for WebSocket handshake
-#include <cstdint>
 namespace ws_detail {
 
-// ----- Minimal SHA-1 --------------------------------------------------------
 struct SHA1 {
     uint32_t h[5] = {0x67452301,0xEFCDAB89,0x98BADCFE,0x10325476,0xC3D2E1F0};
     uint8_t  buf[64]{};
@@ -91,7 +74,6 @@ struct SHA1 {
     }
 };
 
-// ----- Base64 encode --------------------------------------------------------
 static std::string base64(const uint8_t* data, size_t len) {
     static const char T[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out; out.reserve(((len+2)/3)*4);
@@ -104,11 +86,9 @@ static std::string base64(const uint8_t* data, size_t len) {
     return out;
 }
 
-// ----- WebSocket frame builder ----------------------------------------------
-static std::vector<uint8_t> ws_frame(const std::string& payload) {
+static std::vector<uint8_t> ws_frame_binary(const uint8_t* payload, size_t n) {
     std::vector<uint8_t> frame;
-    frame.push_back(0x81); // FIN + text opcode
-    size_t n = payload.size();
+    frame.push_back(0x82); // FIN + binary opcode
     if(n < 126) {
         frame.push_back(static_cast<uint8_t>(n));
     } else if(n < 65536) {
@@ -119,7 +99,7 @@ static std::vector<uint8_t> ws_frame(const std::string& payload) {
         frame.push_back(127);
         for(int i=7;i>=0;--i) frame.push_back((n>>(i*8))&0xFF);
     }
-    for(char c : payload) frame.push_back(static_cast<uint8_t>(c));
+    frame.insert(frame.end(), payload, payload + n);
     return frame;
 }
 
@@ -127,17 +107,55 @@ static std::vector<uint8_t> ws_frame(const std::string& payload) {
 
 namespace hft {
 
+#pragma pack(push, 1)
+struct WireTick {
+    uint8_t  msg_type; // 1 for tick
+    uint16_t symbol_id;
+    int64_t  timestamp_ns;
+    uint32_t bid;
+    uint32_t ask;
+    uint32_t bid_sz;
+    uint32_t ask_sz;
+    uint32_t last_price;
+    uint32_t volume;
+    int64_t  sequence;
+};
+
+struct WireTrade {
+    uint8_t  msg_type; // 2 for trade
+    uint16_t symbol_id;
+    int64_t  timestamp_ns;
+    uint32_t price;
+    uint32_t quantity;
+    uint64_t trade_id;
+    uint64_t bid_order_id;
+    uint64_t ask_order_id;
+    int64_t  sequence;
+};
+#pragma pack(pop)
+
 class WsPublisher {
 public:
     explicit WsPublisher(int port = 8080) : port_(port), running_(false) {}
 
     ~WsPublisher() {
         running_ = false;
-        if(listen_fd_ >= 0) ::close(listen_fd_);
+        if(listen_fd_ >= 0) {
+            ::shutdown(listen_fd_, SHUT_RDWR);
+            ::close(listen_fd_);
+        }
         if(accept_thread_.joinable()) accept_thread_.join();
+        
+        std::lock_guard<std::mutex> lk(clients_mu_);
+        // 1000 Normal Closure payload
+        uint8_t close_frame[4] = {0x88, 0x02, 0x03, 0xE8};
+        for(int fd : clients_) {
+            ::send(fd, close_frame, sizeof(close_frame), MSG_NOSIGNAL);
+            ::close(fd);
+        }
+        clients_.clear();
     }
 
-    // Call once before the simulation loop
     void start() {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         int yes = 1;
@@ -155,40 +173,36 @@ public:
         std::printf("[WsPublisher] Listening on ws://0.0.0.0:%d/\n", port_);
     }
 
-    // Broadcast a market data snapshot tick
     template<typename SymMap>
     void publish_tick(const MarketData& md, const SymMap& sym_map, uint64_t now_ns) {
-        auto it = sym_map.find(static_cast<uint16_t>(md.symbol_id));
-        // Format JSON matching RawExchangeTick in Go ws_client.go
-        char buf[512];
-        int n = std::snprintf(buf, sizeof buf,
-            "{\"type\":\"tick\",\"symbol_id\":%u,\"timestamp_ns\":%llu,"
-            "\"bid\":%u,\"ask\":%u,\"bid_sz\":%u,\"ask_sz\":%u,"
-            "\"last_price\":%u,\"volume\":%u,\"sequence\":%llu}",
-            static_cast<unsigned>(md.symbol_id),
-            static_cast<unsigned long long>(now_ns),
-            md.best_bid_price, md.best_ask_price,
-            md.best_bid_qty,   md.best_ask_qty,
-            md.last_trade_price, md.last_trade_qty,
-            static_cast<unsigned long long>(md.sequence));
-        broadcast(std::string(buf, n));
+        WireTick msg;
+        msg.msg_type = 1;
+        msg.symbol_id = static_cast<uint16_t>(md.symbol_id);
+        msg.timestamp_ns = static_cast<int64_t>(now_ns);
+        msg.bid = md.best_bid_price;
+        msg.ask = md.best_ask_price;
+        msg.bid_sz = md.best_bid_qty;
+        msg.ask_sz = md.best_ask_qty;
+        msg.last_price = md.last_trade_price;
+        msg.volume = md.last_trade_qty;
+        msg.sequence = static_cast<int64_t>(md.sequence);
+        
+        broadcast(reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
     }
 
-    // Broadcast a trade event
     void publish_trade(const Trade& t) {
-        char buf[512];
-        int n = std::snprintf(buf, sizeof buf,
-            "{\"type\":\"trade\",\"symbol_id\":%u,\"timestamp_ns\":%llu,"
-            "\"trade_id\":%llu,\"price\":%u,\"quantity\":%u,"
-            "\"bid_order_id\":%llu,\"ask_order_id\":%llu,\"sequence\":%llu}",
-            static_cast<unsigned>(t.symbol_id),
-            static_cast<unsigned long long>(t.timestamp),
-            static_cast<unsigned long long>(t.trade_id),
-            t.price, t.quantity,
-            static_cast<unsigned long long>(t.bid_order_id),
-            static_cast<unsigned long long>(t.ask_order_id),
-            static_cast<unsigned long long>(t.sequence));
-        broadcast(std::string(buf, n));
+        WireTrade msg;
+        msg.msg_type = 2;
+        msg.symbol_id = static_cast<uint16_t>(t.symbol_id);
+        msg.timestamp_ns = static_cast<int64_t>(t.timestamp);
+        msg.price = t.price;
+        msg.quantity = t.quantity;
+        msg.trade_id = static_cast<uint64_t>(t.trade_id);
+        msg.bid_order_id = static_cast<uint64_t>(t.bid_order_id);
+        msg.ask_order_id = static_cast<uint64_t>(t.ask_order_id);
+        msg.sequence = static_cast<int64_t>(t.sequence);
+
+        broadcast(reinterpret_cast<const uint8_t*>(&msg), sizeof(msg));
     }
 
     size_t client_count() const {
@@ -207,7 +221,6 @@ private:
 
     void accept_loop() {
         while(running_) {
-            // Poll so we can check running_ periodically
             pollfd pfd{listen_fd_, POLLIN, 0};
             if(::poll(&pfd, 1, 200) <= 0) continue;
 
@@ -216,7 +229,6 @@ private:
             int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&peer), &plen);
             if(fd < 0) continue;
 
-            // Do WebSocket handshake in a short-lived thread
             std::thread([this, fd]{
                 if(do_handshake(fd)) {
                     std::lock_guard<std::mutex> lk(clients_mu_);
@@ -234,7 +246,6 @@ private:
         ssize_t n = ::recv(fd, req, sizeof req - 1, 0);
         if(n <= 0) return false;
 
-        // Extract Sec-WebSocket-Key
         const char* key_hdr = ::strstr(req, "Sec-WebSocket-Key:");
         if(!key_hdr) return false;
         key_hdr += 18;
@@ -244,7 +255,6 @@ private:
         while(*key_hdr && *key_hdr != '\r' && *key_hdr != '\n' && ki < 63)
             key[ki++] = *key_hdr++;
 
-        // Compute accept key: SHA1(key + magic), base64
         const char magic[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
         ws_detail::SHA1 sha;
         sha.update(reinterpret_cast<const uint8_t*>(key), ::strlen(key));
@@ -253,7 +263,6 @@ private:
         sha.digest(digest);
         std::string accept = ws_detail::base64(digest, 20);
 
-        // Send 101 response
         std::string resp =
             "HTTP/1.1 101 Switching Protocols\r\n"
             "Upgrade: websocket\r\n"
@@ -262,13 +271,15 @@ private:
         return ::send(fd, resp.c_str(), resp.size(), MSG_NOSIGNAL) > 0;
     }
 
-    void broadcast(const std::string& payload) {
-        auto frame = ws_detail::ws_frame(payload);
+    void broadcast(const uint8_t* payload, size_t n) {
+        auto frame = ws_detail::ws_frame_binary(payload, n);
         std::lock_guard<std::mutex> lk(clients_mu_);
         std::vector<int> alive;
         for(int fd : clients_) {
-            ssize_t sent = ::send(fd, frame.data(), frame.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
-            if(sent > 0) {
+            // Remove MSG_DONTWAIT: blocking send prevents partial writes that corrupt the
+            // WebSocket stream and prevents immediately dropping clients under backpressure.
+            ssize_t sent = ::send(fd, frame.data(), frame.size(), MSG_NOSIGNAL);
+            if(sent == static_cast<ssize_t>(frame.size())) {
                 alive.push_back(fd);
             } else {
                 ::close(fd);
