@@ -99,8 +99,11 @@ class MarketDataRecorder:
         logger.info("connecting to %s", self.config.ws_url)
         async with websockets.connect(
             self.config.ws_url,
-            ping_interval=20,
-            ping_timeout=10,
+            # Disable client-side pings — the Go backend sends its own pings every 20s.
+            # Having both sides send pings causes duplicate ping handling and can
+            # expose raw control frames as application messages in some websockets versions.
+            ping_interval=None,
+            open_timeout=10,
             max_size=2 ** 20,
         ) as ws:
             logger.info("connected")
@@ -113,8 +116,19 @@ class MarketDataRecorder:
                     return
                 self._handle_message(raw_msg)
 
-    def _handle_message(self, raw_msg: str) -> None:
+    def _handle_message(self, raw_msg) -> None:
+        # The Go gateway sends JSON text frames, but WebSocket control frames
+        # (e.g. server-side pings from pingLoop) can arrive as bytes objects in
+        # some versions of the websockets library.  We must handle both.
         try:
+            if isinstance(raw_msg, bytes):
+                # Binary control frames (pings) contain no JSON — skip them.
+                # Text frames mis-delivered as bytes are UTF-8 JSON; decode first.
+                try:
+                    raw_msg = raw_msg.decode("utf-8")
+                except UnicodeDecodeError:
+                    # Not a UTF-8 text payload — definitely a control/binary frame.
+                    return
             msg = json.loads(raw_msg)
         except json.JSONDecodeError:
             return
