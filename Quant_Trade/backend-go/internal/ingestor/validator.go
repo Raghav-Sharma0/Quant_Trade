@@ -59,8 +59,8 @@ func (v *TickValidator) Validate(tick *marketdata.Tick) ValidationResult {
 		return v.fail(tick, "size_below_minimum")
 	}
 
-	if tick.LastPrice <= 0 {
-		return v.fail(tick, "non_positive_last_price")
+	if tick.LastPrice < 0 {
+		return v.fail(tick, "negative_last_price")
 	}
 
 	if tick.Volume < 0 {
@@ -73,7 +73,7 @@ func (v *TickValidator) Validate(tick *marketdata.Tick) ValidationResult {
 	}
 
 	lastPx, ok := v.lastPrice[tick.Symbol]
-	if ok {
+	if ok && lastPx > 0 {
 		jumpPct := (math.Abs(tick.LastPrice-lastPx) / lastPx) * 100
 		if jumpPct > v.maxPriceJumpPct {
 			return v.fail(tick, fmt.Sprintf("price_jump_%.1fpct", jumpPct))

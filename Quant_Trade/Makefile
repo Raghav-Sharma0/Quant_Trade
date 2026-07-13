@@ -1,55 +1,40 @@
+# Detect if we are running inside WSL (Linux with Microsoft kernel)
+IS_WSL := $(shell uname -a 2>/dev/null | grep -i microsoft)
+
 .PHONY: all build-cpp build-go run stop tail clean
 
 all: build-cpp build-go
 
 build-cpp:
-	@echo "=== Building C++ Exchange Simulator ==="
-	@export PATH=$$(echo $$PATH | tr ':' '\n' | grep -v "anaconda" | tr '\n' ':') && \
-	cd exchange-sim && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+ifdef IS_WSL
+	@echo "=== Building C++ Exchange Simulator Natively in WSL ==="
+	@cd exchange-sim && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+else
+	@echo "=== Building C++ Exchange Simulator in WSL (from Windows Host) ==="
+	@wsl sh -c "cd /mnt/d/HFT/Quant_Trade/Quant_Trade/exchange-sim && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build"
+endif
 
 build-go:
 	@echo "=== Building Go Ingestion Backend ==="
-	@cd backend-go && go build -o server ./cmd/server/
+ifdef IS_WSL
+	@cd backend-go && (command -v go >/dev/null 2>&1 && GOOS=windows go build -o server.exe ./cmd/server/ || go.exe build -o server.exe ./cmd/server/)
+else
+	@cd backend-go && go build -o server.exe ./cmd/server/
+endif
+
 
 run: all
-	@mkdir -p logs
-	@echo "=== Starting Python ML Inference Server ==="
-	@if [ -d venv ]; then \
-		. venv/bin/activate && PYTHONPATH=.:ml/inference python3 ml/inference/server.py > logs/inference.log 2>&1 & echo $$! > logs/inference.pid; \
-	else \
-		PYTHONPATH=.:ml/inference python3 ml/inference/server.py > logs/inference.log 2>&1 & echo $$! > logs/inference.pid; \
-	fi
-	@sleep 1
-	@echo "=== Starting Go Ingestion Backend ==="
-	@backend-go/server --config configs/dev.yaml > logs/backend.log 2>&1 & echo $$! > logs/backend.pid
-	@sleep 1
-	@echo "=== Starting Python ML Data Recorder ==="
-	@if [ -d venv ]; then \
-		. venv/bin/activate && PYTHONPATH=. python3 -m ml.data_gathering.recorder > logs/recorder.log 2>&1 & echo $$! > logs/recorder.pid; \
-	else \
-		PYTHONPATH=. python3 -m ml.data_gathering.recorder > logs/recorder.log 2>&1 & echo $$! > logs/recorder.pid; \
-	fi
-	@sleep 1
-	@echo "=== Starting C++ Exchange Simulator ==="
-	@./exchange-sim/build/exchange_sim --synth --duration 3600 --ws-port 8080 --symbol 0 --noise-interval-us 10000 > logs/simulator.log 2>&1 & echo $$! > logs/simulator.pid
-	@echo ""
-	@echo "All systems running! Logs are written to logs/ directory."
-	@echo "To view live logs, run: make tail"
-	@echo "To stop everything, run: make stop"
+	@bash ./scripts/run_local.sh
 
 stop:
-	@echo "=== Stopping all processes ==="
-	@if [ -f logs/recorder.pid ]; then kill $$(cat logs/recorder.pid) 2>/dev/null || true; rm -f logs/recorder.pid; fi
-	@if [ -f logs/backend.pid ]; then kill $$(cat logs/backend.pid) 2>/dev/null || true; rm -f logs/backend.pid; fi
-	@if [ -f logs/simulator.pid ]; then kill $$(cat logs/simulator.pid) 2>/dev/null || true; rm -f logs/simulator.pid; fi
-	@if [ -f logs/inference.pid ]; then kill $$(cat logs/inference.pid) 2>/dev/null || true; rm -f logs/inference.pid; fi
-	@echo "All processes stopped."
+	@bash ./scripts/stop_local.sh
 
 tail:
 	@tail -f logs/*.log
 
 clean:
 	@echo "=== Cleaning build files ==="
-	@rm -rf exchange-sim/build
-	@rm -f backend-go/server
+	@wsl rm -rf exchange-sim/build || rm -rf exchange-sim/build
+	@rm -f backend-go/server.exe
 	@rm -rf logs
+

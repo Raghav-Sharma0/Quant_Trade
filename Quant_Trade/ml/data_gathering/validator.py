@@ -67,8 +67,8 @@ class TickValidator:
         if tick.bid_sz < self.min_size or tick.ask_sz < self.min_size:
             return self._fail(tick, "size_below_minimum")
 
-        if tick.last_price <= 0:
-            return self._fail(tick, "non_positive_last_price")
+        if tick.last_price < 0:
+            return self._fail(tick, "negative_last_price")
 
         if tick.volume < 0:
             return self._fail(tick, "negative_volume")
@@ -80,7 +80,7 @@ class TickValidator:
 
         # --- price jump check (skipped on first tick for a symbol) ---
         last_px = self._last_price.get(tick.symbol)
-        if last_px is not None:
+        if last_px is not None and last_px > 0:
             jump_pct = abs(tick.last_price - last_px) / last_px * 100
             if jump_pct > self.max_price_jump_pct:
                 return self._fail(tick, f"price_jump_{jump_pct:.1f}pct")

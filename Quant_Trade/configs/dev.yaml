@@ -5,7 +5,8 @@ server:
   ws_port: 8081            
 
 exchange:
-  ws_url: "ws://localhost:8080/ws/market-data"  
+  # WSL2 IP — if this stops working run: wsl hostname -I  and update this line
+  ws_url: "ws://localhost:8080/ws/market-data"
   reconnect_delay_s: 1.0
   max_reconnect_delay_s: 30.0
 

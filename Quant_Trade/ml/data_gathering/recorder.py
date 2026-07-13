@@ -66,8 +66,15 @@ class MarketDataRecorder:
         await self.writer.start()
 
         loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: asyncio.ensure_future(self._shutdown()))
+        # add_signal_handler is Unix-only; fall back to signal.signal on Windows.
+        try:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                loop.add_signal_handler(sig, lambda: asyncio.ensure_future(self._shutdown()))
+        except NotImplementedError:
+            # Windows: use standard signal module instead.
+            import signal as _signal
+            _signal.signal(_signal.SIGINT,  lambda s, f: asyncio.ensure_future(self._shutdown()))
+            _signal.signal(_signal.SIGTERM, lambda s, f: asyncio.ensure_future(self._shutdown()))
 
         logger.info(
             "recorder starting url=%s symbols=%s",
