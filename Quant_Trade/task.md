@@ -4,7 +4,7 @@ This task list outlines the remaining steps to build out the full **Risk Engine*
 
 ---
 
-## 📋 Phase 1: Risk Engine Enhancements
+## 📋Phase 1: Risk Engine Enhancements
 
 - [ ] **1. Link `RiskManager` with `PositionManager`**
   - Integrate `PositionManager` as a reference or member inside `RiskManager`.
@@ -24,7 +24,7 @@ This task list outlines the remaining steps to build out the full **Risk Engine*
 
 ---
 
-## 📋 Phase 2: Latency Percentiles (P50 - P99.9)
+##  Phase 2: Latency Percentiles (P50 - P99.9)
 
 - [ ] **1. Build Latency Histograms / Samples**
   - Add a latency sampler to record individual execution timings (in CPU cycles or nanoseconds).
@@ -36,7 +36,7 @@ This task list outlines the remaining steps to build out the full **Risk Engine*
 
 ---
 
-## 📋 Phase 3: Validation and Verification
+##  Phase 3: Validation and Verification
 
 - [ ] **1. Update C++ Risk Tests (`tests/risk_test.cpp`)**
   - Write test assertions verifying:
