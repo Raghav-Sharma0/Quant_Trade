@@ -4,7 +4,11 @@ project(hft_system CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# Default flags (tests + general builds)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -march=native -fno-exceptions -fno-rtti")
+
+# Optimized flags used only for benchmarks
+set(BENCH_FLAGS "-O3 -march=native -fno-exceptions -fno-rtti -funroll-loops")
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -31,6 +35,10 @@ target_link_libraries(bench_order_book hft_core)
 
 add_executable(bench_matching_engine benchmarks/matching_engine_bench.cpp)
 target_link_libraries(bench_matching_engine hft_core)
+
+add_executable(bench_risk_engine benchmarks/bench_risk_engine.cpp)
+target_link_libraries(bench_risk_engine hft_core)
+target_compile_options(bench_risk_engine PRIVATE -O3 -march=native -funroll-loops)
 
 enable_testing()
 add_test(NAME OrderBookTest COMMAND test_order_book)
