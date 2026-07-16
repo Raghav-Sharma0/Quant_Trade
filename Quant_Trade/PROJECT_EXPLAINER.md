@@ -17,51 +17,42 @@ It uses a polyglot architecture to leverage the strengths of each language:
 
 ## 2. System Architecture & Execution Flow
 
-The system runs as an integrated data loop across the WSL/Linux and Windows host borders:
+The system operates as an integrated loop across network interfaces and processes:
 
+### 📊 System Architecture Diagram
 ```mermaid
 graph TD
-    subgraph WSL2 / Linux Environment
-        A[C++ Exchange Simulator] -- "Binary WebSockets (Port 8080)" --> B[Go Ingestion Backend]
-        F[C++ Strategy Bot] -- "Non-blocking Cache" --> G[Order Router]
-    end
+    %% Define Nodes
+    Sim[C++ Exchange Simulator<br/>WSL2 / Linux]
+    GoHub[Go Ingestion Backend<br/>Windows Host]
+    Rec[Python Data Recorder<br/>Windows Host]
+    Inf[Python ML Inference Server<br/>Windows Host]
+    Core[C++ Strategy Core & Risk Engine<br/>Windows / Linux]
 
-    subgraph Windows Host Environment
-        B -- "JSON WebSockets" --> C[Python Data Recorder]
-        C -- "Saves Ticks" --> D[(Parquet Storage)]
-        
-        F -- "Asynchronous gRPC (Port 50051)" --> E[Python ML Inference Server]
-    end
+    %% Define Connections
+    Sim -- "WebSocket (Binary Ticks)" --> GoHub
+    GoHub -- "WebSocket (JSON Ticks)" --> Rec
+    GoHub -- "Writes Parquet" --> GoDb[(data/ticks/)]
+    Rec -- "Writes Raw Parquet" --> PyDb[(ml/data/raw/)]
+    Core -- "Async gRPC (Port 50051)" --> Inf
+    Inf -- "XGBoost Predictions" --> Core
+```
 
-    style A fill:#f9f,stroke:#333,stroke-width:2px
-    style B fill:#bbf,stroke:#333,stroke-width:2px
-    style F fill:#bfb,stroke:#333,stroke-width:2px
-    style E fill:#fbb,stroke:#333,stroke-width:2px
+### 📋 Text-Based Flowchart (Fallback)
+```text
+  [ C++ Exchange Simulator ] (WSL2 / Linux)
+             │
+             ▼ (WebSocket: Packed Binary Ticks)
+  [ Go Ingestion Backend ] (Windows Host)
+        ├───► (WebSocket: JSON Ticks) ──► [ Python Data Recorder ] ──► [ ml/data/raw/ ]
+        └───► (Disk: Parquet Format)  ──► [ data/ticks/ ]
+             
+  [ C++ Strategy Core & Risk ] ◄── (gRPC: Port 50051) ──► [ Python ML Inference Server ]
 ```
 
 ---
 
-## 3. Core C++ Design Concepts (`core-cpp/`)
-
-The C++ Core is optimized for **ultra-low-latency** execution, employing standard industry patterns to keep processing times under a microsecond:
-
-### ⚡ 3.1 Cache Line Alignment & Data Structure Layout
-* **No False Sharing**: Core structures like `Order`, `Trade`, and `ExecutionReport` are annotated with `alignas(64)`. This aligns them to the CPU's L1 cache line size, preventing cache invalidation lines from bouncing between CPU cores.
-* **Compact Layout**: Structs are packed and padded with exact offsets (e.g. `uint8_t _pad[14]`) to keep their sizes exactly at 64 bytes.
-
-### ⏱️ 3.2 Lock-Free Ring Buffers & Memory Pools
-* **No Dynamic Memory Allocation**: Standard C++ heap allocation (`new`/`malloc`) is banned from the critical hot path. 
-* **Custom Memory Pools (`memory/`)**: Objects are pre-allocated at startup inside a block allocator pool. 
-* **Lock-Free SPSC Queues (`queue/`)**: High-performance Single-Producer Single-Consumer ring buffers are used to pass messages between execution threads without thread locks or operating system context switches.
-
-### 🚀 3.3 Asynchronous gRPC Client (Prediction Client)
-* **Non-Blocking Strategy Loop**: Strategy engines cannot afford to block while waiting for a Python gRPC network response.
-* **Thread Offloading**: The C++ Strategy Bot offloads gRPC calls (`Predict`) to a dedicated background execution thread. 
-* **Shared Prediction Cache**: The background thread updates a thread-safe prediction cache. The C++ strategy loop reads from this cache instantly ($O(1)$) on every tick, ensuring it always executes trades using the latest prediction without ever blocking.
-
----
-
-## 4. Deep Dive into Component Roles
+## 3. Deep Dive into Component Roles
 
 ### 3.1 C++ Exchange Simulator (`exchange-sim/`)
 The exchange simulator acts as the primary source of truth for the entire pipeline, replicating real-world market operations.
@@ -113,6 +104,23 @@ Computes high-frequency microstructural metrics from raw ticks:
 #### D. gRPC Inference Server (`ml/inference/`)
 * Runs a high-performance gRPC server on port `50051`.
 * Receives raw tick details from the C++ Strategy Bot, updates its running streaming feature state (EWMA and OBI), queries the XGBoost model, and returns a prediction containing a buy probability and direction.
+
+---
+
+### 3.4 C++ Strategy & Execution Core (`core-cpp/`)
+The strategy execution core comprises the execution algorithms and low-latency infrastructure.
+
+* **Lock-Free Queue Architecture (`core-cpp/include/queue/`)**:
+  Uses Single-Producer Single-Consumer (SPSC) lock-free ring buffers to transfer market events from the network I/O thread to the strategy execution thread without context switching or kernel lock overhead.
+* **Local Limit Order Book (`core-cpp/include/order_book/`)**:
+  Maintains an ultra-fast local representation of the order book. This allows the strategy bot to compute microprice and order book imbalances instantly on every tick.
+* **Pre-Trade Risk Engine (`core-cpp/include/risk/`)**:
+  Evaluates every outgoing order in under **100 nanoseconds** to prevent fat-finger mistakes or capital risk:
+  - *Position Manager*: Tracks net, long, and short quantity, plus realized/unrealized PnL.
+  - *Risk Manager*: Validates order sizes, client exposure limits, sliding-window rate limits, and global/client kill switches.
+* **Prediction Client (`core-cpp/include/grpc/`)**:
+  Sends async gRPC requests to the Python ML Inference server on a non-blocking thread to fetch XGBoost prediction signals (`buy_prob`, `direction`) without halting the critical execution path.
+
 
 ---
 
