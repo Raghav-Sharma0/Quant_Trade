@@ -1,24 +1,29 @@
 // =============================================================================
-//  bench_risk_engine.cpp — HFT Risk Engine Latency Benchmark
+//  bench_risk_engine.cpp  —  HFT Risk Engine Latency Benchmark
 //
-//  Professional benchmark configuration:
-//    Compiler : GCC (__VERSION__)
-//    Flags    : -O3 -march=native -funroll-loops
-//    Warmup   : 100,000 iterations
-//    Benchmark: 1,000,000 iterations
-//    Thread   : Pinned to Core 2 (via sched_setaffinity)
-//    Clock    : RDTSC (TSC) calibrated against CLOCK_MONOTONIC_RAW
+//  Professional benchmark following Jane Street / HRT / Optiver internal style.
 //
-//  Outputs P50 / P90 / P95 / P99 / P99.9 via zero-allocation histogram.
+//  Design principles:
+//    - Zero heap allocation on hot path (static sample array)
+//    - RDTSC with LFENCE serialisation barriers
+//    - Welford's online algorithm for numerically-stable variance
+//    - Exact percentiles from fully-sorted sample array (post-loop)
+//    - CPU pinning via sched_setaffinity
+//    - TSC calibrated against CLOCK_MONOTONIC_RAW
+//
+//  Metrics reported:
+//    min, mean, stddev, variance, CV, p50, p90, p95, p99, p99.9, max,
+//    throughput, outlier count, terminal histogram, spike warning
 // =============================================================================
 
-#define _GNU_SOURCE
-#include <cstdio>
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <memory>
-#include <sched.h>          // sched_setaffinity — CPU pinning
+#include <sched.h>
 #include <pthread.h>
 #include <x86intrin.h>
 
@@ -30,22 +35,30 @@
 using namespace hft;
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  System Info Helpers
+//  Constants
 // ─────────────────────────────────────────────────────────────────────────────
+static constexpr int      WARMUP_ITERS = 100'000;
+static constexpr int      BENCH_ITERS  = 1'000'000;
+static constexpr int      BENCH_CORE   = 2;
 
-// Read CPU model name from /proc/cpuinfo
-static void get_cpu_name(char* buf, size_t buflen) {
+// Static sample storage — 8 MB, zero heap allocation on hot path.
+static uint64_t g_samples[BENCH_ITERS];
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  System helpers
+// ─────────────────────────────────────────────────────────────────────────────
+static void get_cpu_name(char* buf, size_t n) {
     FILE* f = fopen("/proc/cpuinfo", "r");
-    if (!f) { snprintf(buf, buflen, "Unknown"); return; }
+    if (!f) { snprintf(buf, n, "Unknown"); return; }
     char line[256];
+    buf[0] = '\0';
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "model name", 10) == 0) {
-            const char* colon = strchr(line, ':');
-            if (colon) {
-                snprintf(buf, buflen, "%s", colon + 2);
-                // Strip trailing newline
-                size_t len = strlen(buf);
-                if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
+            const char* c = strchr(line, ':');
+            if (c) {
+                snprintf(buf, n, "%s", c + 2);
+                size_t l = strlen(buf);
+                if (l && buf[l-1] == '\n') buf[l-1] = '\0';
             }
             break;
         }
@@ -53,162 +66,149 @@ static void get_cpu_name(char* buf, size_t buflen) {
     fclose(f);
 }
 
-// Read current CPU frequency in MHz for a given core
-static long get_cpu_mhz(int core_id) {
+static long get_cpu_mhz(int core) {
     char path[256];
     snprintf(path, sizeof(path),
-        "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", core_id);
+             "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", core);
     FILE* f = fopen(path, "r");
     if (!f) {
-        // Fallback: read from /proc/cpuinfo (MHz field)
         f = fopen("/proc/cpuinfo", "r");
         if (!f) return -1;
         char line[128];
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "cpu MHz", 7) == 0) {
-                const char* colon = strchr(line, ':');
-                if (colon) {
-                    fclose(f);
-                    return (long)atof(colon + 2);
-                }
+                const char* c = strchr(line, ':');
+                fclose(f);
+                return c ? (long)atof(c + 2) : -1;
             }
         }
         fclose(f);
         return -1;
     }
     long khz = 0;
-    if (fscanf(f, "%ld", &khz) != 1) khz = -1000;
+    fscanf(f, "%ld", &khz);
     fclose(f);
-    return khz / 1000;  // kHz → MHz
+    return khz / 1000;
 }
 
-// Pin current thread to a specific CPU core
-static bool pin_to_core(int core_id) {
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    CPU_SET(core_id, &cpuset);
-    return pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset) == 0;
+static bool pin_to_core(int core) {
+    cpu_set_t s; CPU_ZERO(&s); CPU_SET(core, &s);
+    return pthread_setaffinity_np(pthread_self(), sizeof(s), &s) == 0;
 }
 
-// Calibrate TSC frequency against CLOCK_MONOTONIC_RAW over 200ms
 static double calibrate_ghz() {
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
     uint64_t c0 = __rdtsc();
-    struct timespec sleep_ts { 0, 200'000'000L };
-    nanosleep(&sleep_ts, nullptr);
+    struct timespec sl{0, 200'000'000L};
+    nanosleep(&sl, nullptr);
     uint64_t c1 = __rdtsc();
     clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
-    double elapsed_ns = (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
-    return static_cast<double>(c1 - c0) / elapsed_ns;
+    double ns = (t1.tv_sec - t0.tv_sec) * 1e9 + (t1.tv_nsec - t0.tv_nsec);
+    return (c1 - c0) / ns;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Histogram-based percentile tracker (zero heap allocation)
+//  Stats helpers (all operate on sorted g_samples)
 // ─────────────────────────────────────────────────────────────────────────────
-struct LatencyHistogram {
-    static constexpr int NUM_BUCKETS = 32;
-    uint64_t buckets[NUM_BUCKETS] {};
-    uint64_t total_count = 0;
-    uint64_t min_cycles  = UINT64_MAX;
-    uint64_t max_cycles  = 0;
-    uint64_t sum_cycles  = 0;
+static uint64_t exact_pct(double p) {
+    size_t idx = (size_t)(p / 100.0 * BENCH_ITERS);
+    if (idx >= (size_t)BENCH_ITERS) idx = BENCH_ITERS - 1;
+    return g_samples[idx];
+}
 
-    __attribute__((always_inline))
-    void record(uint64_t cycles) noexcept {
-        ++total_count;
-        sum_cycles += cycles;
-        if (__builtin_expect(cycles < min_cycles, 0)) min_cycles = cycles;
-        if (__builtin_expect(cycles > max_cycles, 0)) max_cycles = cycles;
-        int b = cycles > 0 ? (63 - __builtin_clzll(cycles)) : 0;
+// ─────────────────────────────────────────────────────────────────────────────
+//  Terminal histogram (linear buckets, P0–P99.9 range)
+// ─────────────────────────────────────────────────────────────────────────────
+static void print_histogram(double ghz) {
+    static constexpr int NUM_BUCKETS = 16;
+    static constexpr int BAR_WIDTH   = 40;
+
+    const uint64_t lo  = g_samples[0];
+    const uint64_t hi  = exact_pct(99.9);
+    if (hi <= lo) return;
+
+    const uint64_t bw = (hi - lo + NUM_BUCKETS - 1) / NUM_BUCKETS;
+    uint64_t counts[NUM_BUCKETS] {};
+
+    // Count samples (only up to P99.9 to avoid outlier domination)
+    const size_t pct999_idx = (size_t)(0.999 * BENCH_ITERS);
+    for (size_t i = 0; i < pct999_idx; ++i) {
+        int b = (int)((g_samples[i] - lo) / bw);
         if (b >= NUM_BUCKETS) b = NUM_BUCKETS - 1;
-        ++buckets[b];
+        ++counts[b];
     }
 
-    uint64_t percentile(double pct) const noexcept {
-        uint64_t threshold  = static_cast<uint64_t>(total_count * pct / 100.0);
-        uint64_t cumulative = 0;
-        for (int b = 0; b < NUM_BUCKETS; ++b) {
-            cumulative += buckets[b];
-            if (cumulative >= threshold)
-                return (1ULL << (b + 1));
-        }
-        return max_cycles;
-    }
+    uint64_t max_count = *std::max_element(counts, counts + NUM_BUCKETS);
+    if (max_count == 0) return;
 
-    double mean_cycles() const noexcept {
-        return total_count > 0
-               ? static_cast<double>(sum_cycles) / total_count
-               : 0.0;
+    printf("\n  Latency Distribution (P0 to P99.9, %d buckets)\n\n", NUM_BUCKETS);
+    for (int b = 0; b < NUM_BUCKETS; ++b) {
+        double lo_ns = (lo + b * bw) / ghz;
+        int bar = (int)((double)counts[b] / max_count * BAR_WIDTH);
+        printf("  %6.0f ns | ", lo_ns);
+        for (int j = 0; j < bar; ++j) printf("\xe2\x96\x88"); // UTF-8 block █
+        printf("  (%llu)\n", (unsigned long long)counts[b]);
     }
-};
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  main
 // ─────────────────────────────────────────────────────────────────────────────
 int main() {
-    // ── 1. Pin thread to Core 2 ──────────────────────────────────────────────
-    const int BENCH_CORE = 2;
-    bool pinned = pin_to_core(BENCH_CORE);
+    // ── 1. Environment setup ─────────────────────────────────────────────────
+    bool   pinned  = pin_to_core(BENCH_CORE);
+    char   cpu[256]; get_cpu_name(cpu, sizeof(cpu));
+    long   mhz     = get_cpu_mhz(BENCH_CORE);
+    double GHZ     = calibrate_ghz();
 
-    // ── 2. Collect system info ───────────────────────────────────────────────
-    char cpu_name[256] = "Unknown";
-    get_cpu_name(cpu_name, sizeof(cpu_name));
-    long cpu_mhz = get_cpu_mhz(BENCH_CORE);
+    // ── 2. Config header ─────────────────────────────────────────────────────
+    printf("==============================================================\n");
+    printf("  HFT Core-CPP  |  Risk Engine Latency Benchmark\n");
+    printf("==============================================================\n");
+    printf("  CPU        : %s\n", cpu);
+    printf("  Compiler   : GCC %s\n", __VERSION__);
+    printf("  Flags      : -O3 -march=native -funroll-loops\n");
+    printf("  Iterations : %d (warm-up: %d)\n", BENCH_ITERS, WARMUP_ITERS);
+    printf("  Thread     : Core %d  [pin: %s]\n",
+           BENCH_CORE, pinned ? "OK" : "FAILED");
+    if (mhz > 0)
+        printf("  Frequency  : %ld MHz (current)\n", mhz);
+    printf("  TSC rate   : %.4f GHz (calibrated)\n", GHZ);
+    printf("==============================================================\n\n");
 
-    // ── 3. Calibrate TSC ─────────────────────────────────────────────────────
-    const double GHZ = calibrate_ghz();
-
-    // ── 4. Print professional config header ──────────────────────────────────
-    printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║       HFT Core-CPP Risk Engine — Latency Benchmark          ║\n");
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  CPU        : %-46s║\n", cpu_name);
-    printf("║  Compiler   : GCC %-43s║\n", __VERSION__);
-    printf("║  Flags      : -O3 -march=native -funroll-loops              ║\n");
-    printf("║  Iterations : 1,000,000                                     ║\n");
-    printf("║  Warm-up    : 100,000                                        ║\n");
-    printf("║  Thread     : Pinned to Core %-31d║\n", BENCH_CORE);
-    printf("║  CPU Pin    : %-46s║\n", pinned ? "SUCCESS" : "FAILED (running unpinned)");
-    if (cpu_mhz > 0)
-        printf("║  Frequency  : %ld MHz (current)%*s║\n", cpu_mhz,
-               (int)(46 - snprintf(nullptr, 0, "%ld MHz (current)", cpu_mhz)), "");
-    printf("║  TSC Rate   : %.4f GHz (calibrated)                    ║\n", GHZ);
-    printf("╚══════════════════════════════════════════════════════════════╝\n\n");
-
-    // ── 5. Setup RiskManager with realistic limits ────────────────────────────
+    // ── 3. Risk engine setup ─────────────────────────────────────────────────
     auto pos_ptr = std::make_unique<PositionManager>();
     PositionManager& pos = *pos_ptr;
     RiskManager risk(pos);
 
     const ClientId CLI = 1;
     const SymbolId SYM = 0;
-
-    risk.set_limit(CLI,
-        /*max_pos=*/     100'000,
-        /*max_notional=*/10'000'000,
-        /*max_loss=*/    500'000,
-        /*max_qty=*/     10'000);
+    risk.set_limit(CLI, 100'000, 10'000'000, 500'000, 10'000);
     risk.set_collar_pct(CLI, 5);
-    risk.set_rate_limit(CLI, /*max_orders=*/2'000'000, /*window_ns=*/1'000'000'000ULL);
-    risk.on_market_update(SYM, /*bid=*/19900, /*ask=*/20000);
+    risk.set_rate_limit(CLI, 2'000'000, 1'000'000'000ULL);
+    risk.on_market_update(SYM, 19900, 20000);
 
-    // Typical order: BUY 100 @ $199 — within all limits
     Order order(42, 19900, 100, OrderSide::BUY, OrderType::LIMIT, SYM, CLI, 0);
 
-    // ── 6. Warm-up (100,000 iterations) ─────────────────────────────────────
-    printf("Warming up (100,000 iterations)...\n");
-    for (int i = 0; i < 100'000; ++i) {
+    // ── 4. Warm-up ───────────────────────────────────────────────────────────
+    printf("  [1/3] Warming up (%d iters)...\n", WARMUP_ITERS);
+    for (int i = 0; i < WARMUP_ITERS; ++i) {
         volatile auto r = risk.check_order(order, SYM);
         (void)r;
     }
-    printf("Warm-up complete.\n\n");
 
-    // ── 7. Benchmark loop (1,000,000 iterations) ─────────────────────────────
-    printf("Running benchmark (1,000,000 iterations)...\n");
-    LatencyHistogram hist;
+    // ── 5. Benchmark loop — hot path ─────────────────────────────────────────
+    // Welford's online algorithm — single pass, numerically stable
+    double   welf_mean = 0.0, welf_M2 = 0.0;
+    uint64_t welf_n    = 0;
 
-    for (int i = 0; i < 1'000'000; ++i) {
+    printf("  [2/3] Benchmarking (%d iters)...\n", BENCH_ITERS);
+
+    struct timespec wall0, wall1;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &wall0);
+
+    for (int i = 0; i < BENCH_ITERS; ++i) {
         _mm_lfence();
         uint64_t t0 = __rdtsc();
         _mm_lfence();
@@ -220,89 +220,153 @@ int main() {
         uint64_t t1 = __rdtsc();
         _mm_lfence();
 
-        hist.record(t1 - t0);
+        uint64_t delta = t1 - t0;
+        g_samples[i]   = delta;
+
+        // Welford update (no overflow, numerically stable)
+        ++welf_n;
+        double d1    = (double)delta - welf_mean;
+        welf_mean   += d1 / (double)welf_n;
+        double d2    = (double)delta - welf_mean;
+        welf_M2     += d1 * d2;
     }
 
-    // ── 8. Compute results ───────────────────────────────────────────────────
-    auto to_ns = [&](uint64_t c) -> double { return c / GHZ; };
-    auto to_ns_d = [&](double  c) -> double { return c / GHZ; };
+    clock_gettime(CLOCK_MONOTONIC_RAW, &wall1);
+    double elapsed_s = (wall1.tv_sec - wall0.tv_sec)
+                     + (wall1.tv_nsec - wall0.tv_nsec) * 1e-9;
 
-    const uint64_t p50_c  = hist.percentile(50.0);
-    const uint64_t p90_c  = hist.percentile(90.0);
-    const uint64_t p95_c  = hist.percentile(95.0);
-    const uint64_t p99_c  = hist.percentile(99.0);
-    const uint64_t p999_c = hist.percentile(99.9);
+    // ── 6. Post-processing (outside hot path) ────────────────────────────────
+    printf("  [3/3] Sorting samples & computing statistics...\n\n");
+    std::sort(g_samples, g_samples + BENCH_ITERS);
 
-    // ── 9. Print results table ───────────────────────────────────────────────
-    printf("\n");
-    printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║          check_order() Latency — 1,000,000 Samples          ║\n");
-    printf("╠════════════════╦══════════════════╦═══════════════════════════╣\n");
-    printf("║  Metric        ║  Cycles          ║  Nanoseconds              ║\n");
-    printf("╠════════════════╬══════════════════╬═══════════════════════════╣\n");
-    printf("║  Min           ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)hist.min_cycles, to_ns(hist.min_cycles));
-    printf("║  Mean          ║  %-16.1f║  %-25.2f║\n",
-           hist.mean_cycles(), to_ns_d(hist.mean_cycles()));
-    printf("╠════════════════╬══════════════════╬═══════════════════════════╣\n");
-    printf("║  P50 (median)  ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)p50_c, to_ns(p50_c));
-    printf("║  P90           ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)p90_c, to_ns(p90_c));
-    printf("║  P95           ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)p95_c, to_ns(p95_c));
-    printf("║  P99           ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)p99_c, to_ns(p99_c));
-    printf("║  P99.9 (tail)  ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)p999_c, to_ns(p999_c));
-    printf("╠════════════════╬══════════════════╬═══════════════════════════╣\n");
-    printf("║  Max (spike)   ║  %-16llu║  %-25.2f║\n",
-           (unsigned long long)hist.max_cycles, to_ns(hist.max_cycles));
-    printf("╚════════════════╩══════════════════╩═══════════════════════════╝\n");
+    // Exact percentiles (sorted array)
+    const double p50_c  = (double)exact_pct(50.0);
+    const double p90_c  = (double)exact_pct(90.0);
+    const double p95_c  = (double)exact_pct(95.0);
+    const double p99_c  = (double)exact_pct(99.0);
+    const double p999_c = (double)exact_pct(99.9);
+    const double min_c  = (double)g_samples[0];
+    const double max_c  = (double)g_samples[BENCH_ITERS - 1];
 
-    // ── 10. HFT compliance check ─────────────────────────────────────────────
-    const bool p99_ok  = to_ns(p99_c)  < 500.0;
-    const bool p999_ok = to_ns(p999_c) < 1000.0;
-    printf("\n");
-    printf("╔══════════════════════════════════════════════════════════════╗\n");
-    printf("║                   HFT Compliance Check                      ║\n");
-    printf("╠══════════════════════════════════════════════════════════════╣\n");
-    printf("║  P99  < 500 ns   : %-8s  (%.2f ns)                     ║\n",
-           p99_ok  ? "PASS ✓" : "FAIL ✗", to_ns(p99_c));
-    printf("║  P99.9 < 1000 ns : %-8s  (%.2f ns)                     ║\n",
-           p999_ok ? "PASS ✓" : "FAIL ✗", to_ns(p999_c));
-    printf("╚══════════════════════════════════════════════════════════════╝\n");
+    // Variance / stddev / CV from Welford result
+    double variance_c = (welf_n > 1) ? welf_M2 / (double)(welf_n - 1) : 0.0;
+    double stddev_c   = std::sqrt(variance_c);
+    double cv_pct     = (welf_mean > 0) ? (stddev_c / welf_mean) * 100.0 : 0.0;
 
-    // ── 11. JSON export for run_risk_bench.py ────────────────────────────────
+    // ns conversion
+    auto ns  = [&](double c) { return c / GHZ; };
+
+    // Throughput
+    double checks_per_sec = BENCH_ITERS / elapsed_s;
+
+    // Outlier detection (Tukey fence: Q3 + 3 × IQR)
+    uint64_t q1            = exact_pct(25.0);
+    uint64_t q3            = exact_pct(75.0);
+    uint64_t iqr           = q3 > q1 ? q3 - q1 : 0;
+    uint64_t outlier_fence = q3 + 3 * iqr;
+    int      outlier_count = 0;
+    for (int i = BENCH_ITERS - 1; i >= 0; --i) {
+        if (g_samples[i] <= outlier_fence) break;
+        ++outlier_count;
+    }
+
+    // ── 7. Results table ─────────────────────────────────────────────────────
+    printf("==============================================================\n");
+    printf("  check_order() — %d samples\n", BENCH_ITERS);
+    printf("==============================================================\n");
+    printf("  %-20s %12s  %12s\n", "Metric", "Cycles", "Nanoseconds");
+    printf("  %-20s %12s  %12s\n",
+           "--------------------", "------------", "------------");
+    printf("  %-20s %12.0f  %12.2f ns\n", "Min",          min_c,      ns(min_c));
+    printf("  %-20s %12.2f  %12.2f ns\n", "Mean",         welf_mean,  ns(welf_mean));
+    printf("  %-20s %12.2f  %12.2f ns\n", "Std Dev",      stddev_c,   ns(stddev_c));
+    printf("  %-20s %12.2f  %12.2f ns^2\n","Variance",    variance_c, ns(stddev_c) * ns(stddev_c));
+    printf("  %-20s %11.2f%%\n",           "Coeff of Var",cv_pct);
+    printf("  %-20s %12s  %12s\n", "", "", "");
+    printf("  %-20s %12.0f  %12.2f ns\n", "P50 (median)", p50_c,  ns(p50_c));
+    printf("  %-20s %12.0f  %12.2f ns\n", "P90",          p90_c,  ns(p90_c));
+    printf("  %-20s %12.0f  %12.2f ns\n", "P95",          p95_c,  ns(p95_c));
+    printf("  %-20s %12.0f  %12.2f ns\n", "P99",          p99_c,  ns(p99_c));
+    printf("  %-20s %12.0f  %12.2f ns\n", "P99.9 (tail)", p999_c, ns(p999_c));
+    printf("  %-20s %12.0f  %12.2f ns\n", "Max",          max_c,  ns(max_c));
+    printf("  %-20s %12s  %12s\n", "", "", "");
+    printf("  %-20s %12d\n",  "Outliers (3xIQR)", outlier_count);
+    printf("  %-20s %12.2f ns\n", "Outlier fence",  (double)outlier_fence / GHZ);
+    printf("  %-20s %12.6f s\n", "Total elapsed",   elapsed_s);
+    printf("  %-20s %12.2f M/s\n","Throughput",      checks_per_sec / 1e6);
+    printf("==============================================================\n");
+
+    // ── 8. HFT compliance check ──────────────────────────────────────────────
+    bool p99_ok  = ns(p99_c)  < 500.0;
+    bool p999_ok = ns(p999_c) < 1000.0;
+    printf("\n  HFT Compliance:\n");
+    printf("    P99  < 500 ns  : %s (%.2f ns)\n",
+           p99_ok  ? "PASS" : "FAIL", ns(p99_c));
+    printf("    P99.9 < 1000 ns: %s (%.2f ns)\n",
+           p999_ok ? "PASS" : "FAIL", ns(p999_c));
+
+    // ── 9. Spike warning ─────────────────────────────────────────────────────
+    double max_ns   = ns(max_c);
+    double p999_ns  = ns(p999_c);
+    double spike_ratio = (p999_ns > 0) ? max_ns / p999_ns : 0.0;
+
+    if (spike_ratio > 100.0) {
+        printf("\n  WARNING — Abnormal latency spike detected\n");
+        printf("    Max latency  : %.2f us\n", max_ns / 1000.0);
+        printf("    P99.9 latency: %.2f ns\n", p999_ns);
+        printf("    Spike ratio  : %.0fx above P99.9\n", spike_ratio);
+        printf("    Likely cause : OS scheduler interrupt, context switch,\n");
+        printf("                   TLB miss, page fault, or NUMA migration.\n");
+        printf("    Suggestion   : Run with 'isolcpus=2 nohz_full=2 rcu_nocbs=2'\n");
+        printf("                   or use SCHED_FIFO priority on this core.\n");
+    }
+
+    // ── 10. Terminal histogram ────────────────────────────────────────────────
+    print_histogram(GHZ);
+
+    // ── 11. JSON export ───────────────────────────────────────────────────────
     printf("\n=== JSON_EXPORT_BEGIN ===\n");
     printf("{\n");
     printf("  \"benchmark\": \"risk_engine_check_order\",\n");
     printf("  \"system\": {\n");
-    printf("    \"cpu\": \"%s\",\n",         cpu_name);
+    printf("    \"cpu\": \"%s\",\n",           cpu);
     printf("    \"compiler\": \"GCC %s\",\n", __VERSION__);
     printf("    \"flags\": \"-O3 -march=native -funroll-loops\",\n");
-    printf("    \"cpu_mhz\": %ld,\n",        cpu_mhz > 0 ? cpu_mhz : 0);
-    printf("    \"tsc_ghz\": %.4f,\n",       GHZ);
-    printf("    \"pinned_core\": %d,\n",     BENCH_CORE);
-    printf("    \"pin_success\": %s\n",      pinned ? "true" : "false");
+    printf("    \"cpu_mhz\": %ld,\n",          mhz > 0 ? mhz : 0);
+    printf("    \"tsc_ghz\": %.4f,\n",         GHZ);
+    printf("    \"pinned_core\": %d,\n",       BENCH_CORE);
+    printf("    \"pin_success\": %s\n",        pinned ? "true" : "false");
     printf("  },\n");
     printf("  \"run\": {\n");
-    printf("    \"iterations\": 1000000,\n");
-    printf("    \"warmup\": 100000\n");
+    printf("    \"iterations\": %d,\n",        BENCH_ITERS);
+    printf("    \"warmup\": %d,\n",            WARMUP_ITERS);
+    printf("    \"elapsed_s\": %.6f\n",        elapsed_s);
     printf("  },\n");
-    printf("  \"latency_ns\": {\n");
-    printf("    \"min\":   %.2f,\n",  to_ns(hist.min_cycles));
-    printf("    \"mean\":  %.2f,\n",  to_ns_d(hist.mean_cycles()));
-    printf("    \"p50\":   %.2f,\n",  to_ns(p50_c));
-    printf("    \"p90\":   %.2f,\n",  to_ns(p90_c));
-    printf("    \"p95\":   %.2f,\n",  to_ns(p95_c));
-    printf("    \"p99\":   %.2f,\n",  to_ns(p99_c));
-    printf("    \"p99_9\": %.2f,\n",  to_ns(p999_c));
-    printf("    \"max\":   %.2f\n",   to_ns(hist.max_cycles));
+    printf("  \"latency\": {\n");
+    printf("    \"min\":      %.2f,\n",  ns(min_c));
+    printf("    \"mean\":     %.2f,\n",  ns(welf_mean));
+    printf("    \"stddev\":   %.2f,\n",  ns(stddev_c));
+    printf("    \"variance\": %.4f,\n",  ns(stddev_c) * ns(stddev_c));
+    printf("    \"cv_pct\":   %.2f,\n",  cv_pct);
+    printf("    \"p50\":      %.2f,\n",  ns(p50_c));
+    printf("    \"p90\":      %.2f,\n",  ns(p90_c));
+    printf("    \"p95\":      %.2f,\n",  ns(p95_c));
+    printf("    \"p99\":      %.2f,\n",  ns(p99_c));
+    printf("    \"p99_9\":    %.2f,\n",  ns(p999_c));
+    printf("    \"max\":      %.2f\n",   ns(max_c));
+    printf("  },\n");
+    printf("  \"throughput\": {\n");
+    printf("    \"checks_per_second\": %.0f\n", checks_per_sec);
+    printf("  },\n");
+    printf("  \"outliers\": {\n");
+    printf("    \"count\":        %d,\n",   outlier_count);
+    printf("    \"fence_ns\":     %.2f,\n", (double)outlier_fence / GHZ);
+    printf("    \"spike_ratio\":  %.1f,\n", spike_ratio);
+    printf("    \"spike_warned\": %s\n",    spike_ratio > 100.0 ? "true" : "false");
     printf("  },\n");
     printf("  \"compliance\": {\n");
-    printf("    \"p99_under_500ns\":   %s,\n",  p99_ok  ? "true" : "false");
-    printf("    \"p999_under_1000ns\": %s\n",   p999_ok ? "true" : "false");
+    printf("    \"p99_under_500ns\":    %s,\n", p99_ok  ? "true" : "false");
+    printf("    \"p999_under_1000ns\":  %s\n",  p999_ok ? "true" : "false");
     printf("  }\n");
     printf("}\n");
     printf("=== JSON_EXPORT_END ===\n");
