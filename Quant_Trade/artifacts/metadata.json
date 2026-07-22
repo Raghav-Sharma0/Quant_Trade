@@ -18,8 +18,13 @@
         "ewma_log_ret_10"
     ],
     "horizon": 10,
-    "train_start": "0",
-    "train_end": "9999000000",
-    "model_version": "v1",
-    "timestamp": "2026-07-09T11:28:28.743116"
+    "train_rows": 908179,
+    "positive_rate": 0.028519708119214383,
+    "train_start": "1783969630804342409",
+    "train_end": "1784655813209533977",
+    "cv_auc_mean": 0.924419,
+    "eval_auc": 0.939575,
+    "eval_precision": 0.696429,
+    "model_version": "v20260721_180325",
+    "timestamp": "2026-07-21T18:03:25.883128+00:00"
 }
