@@ -45,12 +45,12 @@ The resource specification ([simulation-cronjob.yaml](./simulation-cronjob.yaml)
 ### A. Lifecycle & Execution Policies
 | Field | Value | Rationale |
 | :--- | :--- | :--- |
-| `schedule` | `"*/30 * * * *"` | Triggers the simulation at standard intervals (e.g., every 30 minutes). |
-| `concurrencyPolicy` | `Forbid` | **Critical.** Prevents a new simulation pod from starting if a previous run is still active. This avoids port collisions on port `8080`. |
-| `startingDeadlineSeconds` | `60` | Allows a startup window of 60 seconds if the cluster scheduler is congested. |
-| `activeDeadlineSeconds` | `360` | A timeout buffer (e.g. 6 minutes for a 5-minute run) to force-kill stuck processes. |
-| `restartPolicy` | `OnFailure` | Restarts the pod if it crashes unexpectedly, but prevents infinite boot loops on configuration errors. |
-| `backoffLimit` | `2` | Limits job retries before declaring a failure. |
+| `schedule` | `"0 5 * * *"` | Fires once daily at 05:00 UTC, before market open. |
+| `concurrencyPolicy` | `Forbid` | Prevents a second pod from starting if the previous run is still active. Two simulators binding port 8080 simultaneously would both crash. |
+| `startingDeadlineSeconds` | `60` | If the cluster misses the trigger by more than 60s, skip this run rather than starting a stale delayed simulation. |
+| `activeDeadlineSeconds` | `84900` | Hard kill after 23h 35min. Catches stuck processes before the next day's 05:00 trigger. |
+| `restartPolicy` | `OnFailure` | Restarts the container on non-zero exits (crashes). Never restarts on a clean exit 0 (normal completion). |
+| `backoffLimit` | `2` | Retry up to 2 times on failure before marking the job as Failed. |
 
 ### B. CPU & Memory Allocation (QoS)
 To guarantee low latency and prevent scheduling jitter:

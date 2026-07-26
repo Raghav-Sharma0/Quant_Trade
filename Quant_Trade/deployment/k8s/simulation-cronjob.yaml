@@ -1,0 +1,151 @@
+# simulation-cronjob.yaml
+# C++ exchange simulator CronJob — fires daily at 05:00 UTC
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hft
+  labels:
+    app.kubernetes.io/part-of: hft-platform
+    environment: production
+
+---
+# Tunable parameters — edit this ConfigMap and apply, no image rebuild needed
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hft-sim-config
+  namespace: hft
+  labels:
+    app.kubernetes.io/component: exchange-simulator
+data:
+  SIM_MODE: "synth"                            # synth (market maker + noise trader) or replay (CSV)
+  SIM_DURATION: "82800"                        # 23 hours in seconds (covers trading day)
+  SIM_SYMBOL: "0"                              # symbol ID 0 = AAPL (matches configs/dev.yaml)
+  SIM_SPREAD: "5"                              # market maker half-spread in price ticks
+  SIM_NOISE_US: "10000"                        # noise trader order interval in microseconds (10ms)
+  SIM_WS_PORT: "8080"                          # WebSocket publisher port
+  SIM_REPLAY_CSV: "/data/exchange_replay.csv"  # CSV file path for replay mode
+  SIM_SPEED: "1.0"                             # replay speed multiplier (1.0 = real-time)
+
+---
+# Headless Service for DNS-based pod discovery: ws://hft-exchange-sim-svc.hft.svc.cluster.local:8080
+apiVersion: v1
+kind: Service
+metadata:
+  name: hft-exchange-sim-svc
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: exchange-simulator
+    app.kubernetes.io/component: market-data-feed
+spec:
+  clusterIP: None  # headless: DNS resolves directly to pod IP (skips load balancer)
+  selector:
+    app: exchange-sim
+  ports:
+    - name: ws-binary
+      protocol: TCP
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: hft-exchange-sim
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: exchange-simulator
+    app.kubernetes.io/component: market-data-feed
+    app.kubernetes.io/part-of: hft-platform
+  annotations:
+    description: "C++ exchange simulator, runs daily at 05:00 UTC"
+spec:
+  schedule: "0 5 * * *"                # 05:00 AM UTC every day
+  concurrencyPolicy: Forbid            # skips new run if previous pod is still active
+  startingDeadlineSeconds: 60          # skips run if cluster misses schedule by >60s
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+
+  jobTemplate:
+    metadata:
+      labels:
+        app: exchange-sim
+        app.kubernetes.io/component: market-data-feed
+    spec:
+      activeDeadlineSeconds: 84900     # 23h 35m hard timeout to kill stuck processes
+      backoffLimit: 2                  # retry limit on failure
+
+      template:
+        metadata:
+          labels:
+            app: exchange-sim          # matches headless Service selector
+          annotations:
+            prometheus.io/scrape: "false"
+        spec:
+          restartPolicy: OnFailure     # restarts on crash, not on normal exit 0
+
+          nodeSelector:
+            exchange-sim: "true"       # pins pod to dedicated low-latency nodes
+
+          tolerations:
+            - key: "exchange-sim"
+              operator: "Equal"
+              value: "true"
+              effect: "NoSchedule"
+
+          containers:
+            - name: exchange-sim
+              image: ghcr.io/anshul/hft/exchange-sim:latest
+              imagePullPolicy: Always
+
+              ports:
+                - name: ws-binary
+                  containerPort: 8080
+                  protocol: TCP
+
+              envFrom:
+                - configMapRef:
+                    name: hft-sim-config
+
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  exec /app/exchange_sim \
+                    --${SIM_MODE} \
+                    --duration          ${SIM_DURATION} \
+                    --symbol            ${SIM_SYMBOL} \
+                    --spread            ${SIM_SPREAD} \
+                    --noise-interval-us ${SIM_NOISE_US} \
+                    --ws-port           ${SIM_WS_PORT}
+
+              resources:
+                requests:
+                  cpu: "2000m"         # 2 dedicated CPU cores (Guaranteed QoS class)
+                  memory: "512Mi"
+                limits:
+                  cpu: "2000m"
+                  memory: "512Mi"
+
+              livenessProbe:
+                tcpSocket:
+                  port: 8080
+                initialDelaySeconds: 15 # wait for socket bind
+                periodSeconds: 30
+                failureThreshold: 3
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 1000
+                capabilities:
+                  drop:
+                    - ALL
+                  add:
+                    - NET_BIND_SERVICE # permits non-root socket bind on 8080
+
+          volumes:
+            - name: tmp
+              emptyDir: {}
