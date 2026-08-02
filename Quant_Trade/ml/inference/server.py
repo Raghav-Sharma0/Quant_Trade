@@ -183,6 +183,23 @@ def serve() -> None:
     workers         = int(os.getenv("ML_WORKERS",     "4"))
     reload_interval = int(os.getenv("ML_RELOAD_INTERVAL", "30"))
 
+    # Bootstrap default model files if they don't exist in the targeted directory (e.g. fresh PVC)
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir, exist_ok=True)
+    
+    model_path = os.path.join(model_dir, "model.pkl")
+    if not os.path.exists(model_path):
+        default_dir = "/app/artifacts"
+        if os.path.exists(default_dir) and os.path.abspath(default_dir) != os.path.abspath(model_dir):
+            logger.info("Bootstrapping default model files from %s to %s", default_dir, model_dir)
+            import shutil
+            for filename in ["model.pkl", "pipe.pkl", "metadata.json"]:
+                src = os.path.join(default_dir, filename)
+                dst = os.path.join(model_dir, filename)
+                if os.path.exists(src):
+                    shutil.copy2(src, dst)
+                    logger.info("Copied %s to %s", filename, dst)
+
     servicer = PredictionService(model_dir)
 
     # Start the background watcher so that cron-driven retraining auto-promotes

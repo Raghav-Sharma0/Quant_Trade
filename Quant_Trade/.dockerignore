@@ -1,0 +1,41 @@
+# Dependency and build directories
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+out/
+dist/
+build/
+.git/
+.gitignore
+
+# Go binaries and local builds
+backend-go/server
+backend-go/server.exe
+backend-go/server.exe~
+
+# C++ build directories and simulator bin
+exchange-sim/build/
+exchange-sim/build_debug/
+exchange-sim/exchange_sim
+
+# Local logs and database files
+logs/
+data/ticks/
+*.parquet
+*.csv
+*.json
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+ml/inference/*_pb2.py
+ml/inference/*_pb2_grpc.py
+
+# IDE files
+.vscode/
+.idea/
+.gemini/

@@ -3,6 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 
+#ifdef PAGE_SIZE
+#undef PAGE_SIZE
+#endif
+
 namespace hft {
 
 constexpr size_t   PAGE_SIZE       = 4096;

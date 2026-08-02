@@ -1,0 +1,293 @@
+# platform-services.yaml
+# QuantTrade Core Platform Services — Ingestion Backend, ML Predictor, & Next.js Frontend
+#
+# Configured as internal ClusterIP services to ensure zero public exposure.
+# Access via secure port forwarding:
+#   kubectl port-forward svc/hft-frontend-svc -n hft 3000:3000
+#   kubectl port-forward svc/hft-backend-svc -n hft 8081:8081
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hft
+  labels:
+    app.kubernetes.io/part-of: hft-platform
+    environment: production
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: hft-shared-data-pvc
+  namespace: hft
+  labels:
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  accessModes:
+    - ReadWriteOnce # Compatible with Minikube default storage class
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hft-backend-config
+  namespace: hft
+  labels:
+    app.kubernetes.io/part-of: hft-platform
+data:
+  prod.yaml: |
+    server:
+      grpc_port: 9090
+      ws_port: 8081
+    exchange:
+      # Connects directly to the headless service of the exchange simulator
+      ws_url: "ws://hft-exchange-sim-svc.hft.svc.cluster.local:8080/ws/market-data"
+      reconnect_delay_s: 1.0
+      max_reconnect_delay_s: 10.0
+    storage:
+      output_dir: "/data/ticks"
+      buffer_size: 5000
+      flush_interval_s: 5.0
+      max_file_ticks: 200000
+    symbol_map:
+      0: "AAPL"
+      1: "MSFT"
+      2: "TSLA"
+      3: "NVDA"
+    logging:
+      level: "info"
+      format: "json"
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. PYTHON ML PREDICTOR SERVICE
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hft-ml-predictor-deploy
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: ml-predictor
+    app.kubernetes.io/component: inference-engine
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-predictor
+  template:
+    metadata:
+      labels:
+        app: ml-predictor
+    spec:
+      containers:
+        - name: ml-predictor
+          image: quant_trade/ml-predictor:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: grpc-ml
+              containerPort: 50051
+              protocol: TCP
+          env:
+            - name: ML_MODEL_DIR
+              value: "/data/artifacts"
+            - name: ML_GRPC_PORT
+              value: "50051"
+            - name: ML_WORKERS
+              value: "4"
+            - name: ML_RELOAD_INTERVAL
+              value: "10" # Fast reload monitoring for newly trained models
+          volumeMounts:
+            - name: shared-storage
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "1000m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            tcpSocket:
+              port: 50051
+            initialDelaySeconds: 10
+            periodSeconds: 20
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: hft-shared-data-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hft-ml-predictor-svc
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: ml-predictor
+    app.kubernetes.io/component: inference-engine
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  type: ClusterIP # Kept internal
+  selector:
+    app: ml-predictor
+  ports:
+    - name: grpc-ml
+      protocol: TCP
+      port: 50051
+      targetPort: 50051
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. GO INGESTION BACKEND
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hft-backend-deploy
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: ingestion-backend
+    app.kubernetes.io/component: market-data-routing
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: quant_trade/backend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: ws-server
+              containerPort: 8081
+              protocol: TCP
+            - name: grpc-server
+              containerPort: 9090
+              protocol: TCP
+          volumeMounts:
+            - name: shared-storage
+              mountPath: /data
+            - name: config-volume
+              mountPath: /app/configs
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          livenessProbe:
+            tcpSocket:
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 15
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: hft-shared-data-pvc
+        - name: config-volume
+          configMap:
+            name: hft-backend-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hft-backend-svc
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: ingestion-backend
+    app.kubernetes.io/component: market-data-routing
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  type: ClusterIP # Kept internal
+  selector:
+    app: backend
+  ports:
+    - name: ws
+      protocol: TCP
+      port: 8081
+      targetPort: 8081
+    - name: grpc
+      protocol: TCP
+      port: 9090
+      targetPort: 9090
+
+---
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. NEXT.JS FRONTEND
+# ──────────────────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hft-frontend-deploy
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: dashboard-frontend
+    app.kubernetes.io/component: ui
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: quant_trade/frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-ui
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3000"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            tcpSocket:
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hft-frontend-svc
+  namespace: hft
+  labels:
+    app.kubernetes.io/name: dashboard-frontend
+    app.kubernetes.io/component: ui
+    app.kubernetes.io/part-of: hft-platform
+spec:
+  type: ClusterIP # Kept internal
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      protocol: TCP
+      port: 3000
+      targetPort: 3000

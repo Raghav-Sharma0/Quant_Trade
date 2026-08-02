@@ -62,7 +62,7 @@ metadata:
   annotations:
     description: "C++ exchange simulator, runs daily at 05:00 UTC"
 spec:
-  schedule: "0 5 * * *"                # 05:00 AM UTC every day
+  schedule: "*/10 * * * *"                # Runs every 10 minutes (e.g. 2:00, 2:10, 2:20, etc.)
   concurrencyPolicy: Forbid            # skips new run if previous pod is still active
   startingDeadlineSeconds: 60          # skips run if cluster misses schedule by >60s
   successfulJobsHistoryLimit: 3
@@ -86,19 +86,10 @@ spec:
         spec:
           restartPolicy: OnFailure     # restarts on crash, not on normal exit 0
 
-          nodeSelector:
-            exchange-sim: "true"       # pins pod to dedicated low-latency nodes
-
-          tolerations:
-            - key: "exchange-sim"
-              operator: "Equal"
-              value: "true"
-              effect: "NoSchedule"
-
           containers:
             - name: exchange-sim
-              image: ghcr.io/anshul/hft/exchange-sim:latest
-              imagePullPolicy: Always
+              image: quant_trade/exchange-sim:latest
+              imagePullPolicy: IfNotPresent
 
               ports:
                 - name: ws-binary
@@ -112,7 +103,7 @@ spec:
               command: ["/bin/sh", "-c"]
               args:
                 - |
-                  exec /app/exchange_sim \
+                  exec /app/exchange-sim/build/exchange_sim \
                     --${SIM_MODE} \
                     --duration          ${SIM_DURATION} \
                     --symbol            ${SIM_SYMBOL} \
@@ -122,10 +113,10 @@ spec:
 
               resources:
                 requests:
-                  cpu: "2000m"         # 2 dedicated CPU cores (Guaranteed QoS class)
-                  memory: "512Mi"
+                  cpu: "500m"
+                  memory: "256Mi"
                 limits:
-                  cpu: "2000m"
+                  cpu: "1000m"
                   memory: "512Mi"
 
               livenessProbe:
