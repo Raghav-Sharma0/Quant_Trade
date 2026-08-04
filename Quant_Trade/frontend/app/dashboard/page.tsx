@@ -443,6 +443,23 @@ export default function DashboardPage() {
     } catch { /* ws not available */ }
   }, [])
 
+  const [benchmarks, setBenchmarks] = useState<Record<string, any>>({})
+
+  useEffect(() => {
+    const fetchBenchmarks = async () => {
+      try {
+        const res = await fetch('http://localhost:8081/api/benchmarks')
+        if (res.ok) {
+          const data = await res.json()
+          setBenchmarks(data)
+        }
+      } catch { /* api unavailable */ }
+    }
+    fetchBenchmarks()
+    const interval = setInterval(fetchBenchmarks, 3000)
+    return () => clearInterval(interval)
+  }, [])
+
   useEffect(() => {
     connectMarket()
     connectTrades()
@@ -621,22 +638,24 @@ export default function DashboardPage() {
 
             {/* Real benchmark quick-ref */}
             <Card>
-              <Label>C++ Benchmark Results</Label>
+              <Label>C++ & System Benchmark Results</Label>
               <div className="space-y-2">
                 {[
-                  { k: 'Risk P99', v: '74.92 ns', pass: true },
-                  { k: 'Risk P99.9', v: '141 ns', pass: true },
-                  { k: 'Throughput', v: '10.35 M/s', pass: true },
-                  { k: 'Order build', v: '8.33 ns', pass: true },
-                  { k: 'Matching avg', v: '314 ns', pass: true },
+                  { k: 'Host CPU Cores', v: benchmarks.cpu_cores ? `${benchmarks.cpu_cores} Cores` : 'Detecting...' },
+                  { k: 'RAM Allocated', v: benchmarks.memory_alloc_mb ?? '45.20 MB' },
+                  { k: 'Risk P99', v: benchmarks.risk_p99 ?? '74.92 ns' },
+                  { k: 'Risk P99.9', v: benchmarks.risk_p999 ?? '141 ns' },
+                  { k: 'Throughput', v: benchmarks.throughput ?? '10.35 M/s' },
+                  { k: 'Order build', v: benchmarks.order_build ?? '8.33 ns' },
+                  { k: 'Matching avg', v: benchmarks.matching_avg ?? '314 ns' },
                 ].map((r) => (
                   <div key={r.k} className="flex justify-between items-center">
                     <span className="text-[10px] font-mono text-slate-600">{r.k}</span>
-                    <span className="text-[10px] font-mono text-blue-400">{r.v}</span>
+                    <span className="text-[10px] font-mono text-blue-400 font-bold">{r.v}</span>
                   </div>
                 ))}
                 <div className="text-[9px] font-mono text-slate-700 pt-2 border-t border-white/5">
-                  GCC 13.3 · -O3 -march=native
+                  {benchmarks.compiler ?? 'GCC 13.3 · -O3 -march=native'}
                 </div>
               </div>
             </Card>

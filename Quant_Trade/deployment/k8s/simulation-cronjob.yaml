@@ -62,19 +62,20 @@ metadata:
   annotations:
     description: "C++ exchange simulator, runs daily at 05:00 UTC"
 spec:
-  suspend: true                          # Suspended to prevent DNS poisoning from completed pods
+  suspend: false                         # Runs every 10 minutes automatically
   schedule: "*/10 * * * *"
   concurrencyPolicy: Forbid
   startingDeadlineSeconds: 60
-  successfulJobsHistoryLimit: 0
-  failedJobsHistoryLimit: 0
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
 
   jobTemplate:
     metadata:
       labels:
-        app: exchange-sim
+        app: exchange-sim-cron
         app.kubernetes.io/component: market-data-feed
     spec:
+      ttlSecondsAfterFinished: 10        # Auto-deletes finished job pods after 10s to keep DNS clean
       activeDeadlineSeconds: 84900     # 23h 35m hard timeout to kill stuck processes
       backoffLimit: 2                  # retry limit on failure
 
