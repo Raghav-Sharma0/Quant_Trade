@@ -85,18 +85,20 @@ echo.
 :: ---------------------------------------------------------------
 echo [6/7] Starting Exchange Simulator...
 
-:: Delete any leftover test pods or old jobs
+:: Delete any leftover test pods, completed cronjob pods, or old jobs
 kubectl delete pod hft-simulator-test -n hft --ignore-not-found >nul 2>&1
-kubectl delete job hft-sim-run -n hft --ignore-not-found >nul 2>&1
+kubectl delete pod --field-selector=status.phase=Completed -n hft --ignore-not-found >nul 2>&1
+kubectl delete job --all -n hft --ignore-not-found >nul 2>&1
 
 :: Run the simulator as a pod directly
 kubectl run hft-simulator-test ^
   --image=quant_trade/exchange-sim:latest ^
   --image-pull-policy=Never ^
   --namespace=hft ^
-  --restart=Never ^
+  --labels=app=exchange-sim ^
+  --restart=Always ^
   --command -- /app/exchange-sim/build/exchange_sim ^
-  --synth --duration 82800 --symbol 0 --spread 20 --noise-interval-us 100000 --ws-port 8080
+  --synth --duration 82800 --symbol 0 --spread 2 --noise-interval-us 100000 --ws-port 8080
 
 echo     Simulator pod created. OK
 echo.

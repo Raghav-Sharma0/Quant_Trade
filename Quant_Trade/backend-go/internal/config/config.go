@@ -29,10 +29,15 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
+type MLConfig struct {
+	GRPCAddr string `yaml:"grpc_addr"` // e.g. "hft-ml-predictor-svc:50051"
+}
+
 type Config struct {
 	Server    ServerConfig          `yaml:"server"`
 	Exchange  ExchangeConfig        `yaml:"exchange"`
 	Storage   StorageConfig         `yaml:"storage"`
+	ML        MLConfig              `yaml:"ml"`
 	SymbolMap map[uint16]string     `yaml:"symbol_map"`
 	Logging   LoggingConfig         `yaml:"logging"`
 }

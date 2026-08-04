@@ -52,6 +52,8 @@ data:
       buffer_size: 5000
       flush_interval_s: 5.0
       max_file_ticks: 200000
+    ml:
+      grpc_addr: "hft-ml-predictor-svc:50051"
     symbol_map:
       0: "AAPL"
       1: "MSFT"
@@ -87,7 +89,7 @@ spec:
       containers:
         - name: ml-predictor
           image: quant_trade/ml-predictor:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           ports:
             - name: grpc-ml
               containerPort: 50051
@@ -166,8 +168,8 @@ spec:
     spec:
       containers:
         - name: backend
-          image: quant_trade/backend:latest
-          imagePullPolicy: IfNotPresent
+          image: quant_trade/hft-backend:latest
+          imagePullPolicy: Never
           ports:
             - name: ws-server
               containerPort: 8081
@@ -249,8 +251,8 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: quant_trade/frontend:latest
-          imagePullPolicy: IfNotPresent
+          image: quant_trade/hft-frontend:latest
+          imagePullPolicy: Never
           ports:
             - name: http-ui
               containerPort: 3000

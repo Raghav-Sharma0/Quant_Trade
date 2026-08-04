@@ -12,6 +12,7 @@ type Trade struct {
 	TradeID     uint64  `json:"trade_id"`
 	Price       float64 `json:"price"`
 	Quantity    float64 `json:"quantity"`
+	Side        string  `json:"side"` // "BUY" or "SELL"
 	BidOrderID  uint64  `json:"bid_order_id"`
 	AskOrderID  uint64  `json:"ask_order_id"`
 	Sequence    int64   `json:"sequence"`

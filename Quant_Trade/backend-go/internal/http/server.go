@@ -10,23 +10,28 @@ import (
 	"strings"
 	"time"
 
+	mlpkg "github.com/anshul/hft/backend/internal/ml"
 	mdsvc "github.com/anshul/hft/backend/internal/service/marketdata"
 	"github.com/anshul/hft/backend/internal/websocket"
 	"go.uber.org/zap"
 )
 
 type Server struct {
-	port    int
-	svc     *mdsvc.Service
-	logger  *zap.Logger
-	httpSrv *http.Server
+	port     int
+	svc      *mdsvc.Service
+	mlClient *mlpkg.Client
+	mlHub    *mlpkg.PredictionHub
+	logger   *zap.Logger
+	httpSrv  *http.Server
 }
 
-func NewServer(port int, svc *mdsvc.Service, logger *zap.Logger) *Server {
+func NewServer(port int, svc *mdsvc.Service, mlClient *mlpkg.Client, mlHub *mlpkg.PredictionHub, logger *zap.Logger) *Server {
 	return &Server{
-		port:   port,
-		svc:    svc,
-		logger: logger,
+		port:     port,
+		svc:      svc,
+		mlClient: mlClient,
+		mlHub:    mlHub,
+		logger:   logger,
 	}
 }
 
@@ -47,9 +52,10 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) Start() {
 	mux := http.NewServeMux()
 
-	gw := websocket.NewGateway(s.svc, s.logger)
+	gw := websocket.NewGateway(s.svc, s.mlClient, s.mlHub, s.logger)
 	mux.HandleFunc("/ws/market-data", gw.HandleMarketData)
 	mux.HandleFunc("/ws/trades", gw.HandleTrades)
+	mux.HandleFunc("/ws/ml-predictions", gw.HandleMLPredictions)
 
 	mux.HandleFunc("/health", enableCORS(s.handleHealth))
 	mux.HandleFunc("/ready", enableCORS(s.handleReady))
@@ -63,7 +69,7 @@ func (s *Server) Start() {
 
 	s.logger.Info("HTTP gateway started",
 		zap.Int("port", s.port),
-		zap.Strings("routes", []string{"/ws/market-data", "/ws/trades", "/health", "/ready", "/api/benchmarks"}),
+		zap.Strings("routes", []string{"/ws/market-data", "/ws/trades", "/ws/ml-predictions", "/health", "/ready", "/api/benchmarks"}),
 	)
 
 	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

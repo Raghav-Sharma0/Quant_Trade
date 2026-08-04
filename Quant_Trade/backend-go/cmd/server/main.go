@@ -13,6 +13,7 @@ import (
 	"github.com/anshul/hft/backend/internal/hub"
 	httpserver "github.com/anshul/hft/backend/internal/http"
 	"github.com/anshul/hft/backend/internal/ingestor"
+	mlpkg "github.com/anshul/hft/backend/internal/ml"
 	mdsvc "github.com/anshul/hft/backend/internal/service/marketdata"
 	"github.com/anshul/hft/backend/internal/storage"
 	"go.uber.org/zap"
@@ -41,13 +42,36 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// --- ML gRPC client & prediction hub ---
+	mlAddr := cfg.ML.GRPCAddr
+	if mlAddr == "" {
+		mlAddr = "hft-ml-predictor-svc:50051" // fallback default
+	}
+	mlClient, err := mlpkg.NewClient(mlAddr, logger)
+	if err != nil {
+		logger.Warn("ML gRPC client dial failed — ML predictions will be unavailable", zap.String("addr", mlAddr), zap.Error(err))
+	}
+	if mlClient != nil {
+		defer mlClient.Close()
+	}
+
+	mlHub := mlpkg.NewPredictionHub()
+
+	if mlClient != nil {
+		tickSub := tickHub.Subscribe()
+		worker := mlpkg.NewWorker(mlClient, mlHub, tickSub, logger)
+		go worker.Run(ctx)
+		logger.Info("ML prediction worker started", zap.String("addr", mlAddr))
+	}
+
+	// --- Core services ---
 	ingest := ingestor.NewIngestor(cfg.Exchange, cfg.SymbolMap, tickHub, tradeHub, writer, logger)
 	go ingest.Run(ctx)
 
 	grpcServer := grpc.NewServer(cfg.Server.GRPCPort, tickHub, reader, writer, logger)
 	go grpcServer.Start()
 
-	httpServer := httpserver.NewServer(cfg.Server.WSPort, svc, logger)
+	httpServer := httpserver.NewServer(cfg.Server.WSPort, svc, mlClient, mlHub, logger)
 	go httpServer.Start()
 
 	sigChan := make(chan os.Signal, 1)
@@ -63,4 +87,4 @@ func main() {
 	httpServer.Stop(shutdownCtx)
 	grpcServer.Stop()
 	writer.Stop()
-}
+}

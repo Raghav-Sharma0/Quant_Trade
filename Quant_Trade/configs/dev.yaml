@@ -14,8 +14,10 @@ storage:
   output_dir: "data/ticks"   
   buffer_size: 10000         
   flush_interval_s: 5.0      
-  max_file_ticks: 500000     
+  max_file_ticks: 500000
 
+ml:
+  grpc_addr: "hft-ml-predictor-svc:50051"   # Kubernetes service DNS name
 
 
 symbol_map:

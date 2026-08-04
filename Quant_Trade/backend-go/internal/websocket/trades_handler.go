@@ -62,22 +62,4 @@ func (g *Gateway) writeTrade(conn *websocket.Conn, trade *hub.Trade, mu *sync.Mu
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
-
-func (g *Gateway) pingLoop(conn *websocket.Conn, done chan struct{}, mu *sync.Mutex) {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-ticker.C:
-			mu.Lock()
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			err := conn.WriteMessage(websocket.PingMessage, nil)
-			mu.Unlock()
-			if err != nil {
-				return
-			}
-		}
-	}
-}
+

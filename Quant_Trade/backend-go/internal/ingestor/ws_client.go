@@ -187,12 +187,21 @@ func (c *WSClient) readMessages(ctx context.Context, conn *websocket.Conn, symbo
 				continue
 			}
 
+			// Determine side: NoiseTrader order_id is lower (< 1,000,000) than MarketMaker.
+			// If bidId < askId → NoiseTrader is buying (BUY).
+			// If bidId > askId → NoiseTrader is selling (SELL).
+			side := "BUY"
+			if bidId > askId {
+				side = "SELL"
+			}
+
 			trade := &hub.Trade{
 				TimestampNs: ts,
 				Symbol:      symbolStr,
 				TradeID:     tradeId,
 				Price:       float64(price),
 				Quantity:    float64(qty),
+				Side:        side,
 				BidOrderID:  bidId,
 				AskOrderID:  askId,
 				Sequence:    seq,

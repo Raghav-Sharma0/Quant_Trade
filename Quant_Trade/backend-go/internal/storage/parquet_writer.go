@@ -265,7 +265,28 @@ func (w *ParquetWriter) writeFreshParquet(path string, ticks []ParquetTick) erro
 	return writer.Close()
 }
 
-func (w *ParquetWriter) readParquetFile(path string) ([]ParquetTick, error) {
+func (w *ParquetWriter) readParquetFile(path string) (ticks []ParquetTick, retErr error) {
+	// Guard: parquet.NewReader panics on empty/truncated files — recover gracefully.
+	defer func() {
+		if r := recover(); r != nil {
+			w.logger.Warn("Corrupted parquet file detected, will overwrite",
+				zap.String("path", path),
+				zap.Any("panic", r),
+			)
+			ticks = nil
+			retErr = fmt.Errorf("corrupted parquet file: %v", r)
+		}
+	}()
+
+	// Skip files that are too small to be a valid parquet file (magic bytes = 4 bytes header + 4 bytes footer).
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() < 12 {
+		return nil, fmt.Errorf("parquet file too small (%d bytes), skipping", info.Size())
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -275,11 +296,9 @@ func (w *ParquetWriter) readParquetFile(path string) ([]ParquetTick, error) {
 	reader := parquet.NewReader(f, parquet.SchemaOf(ParquetTick{}))
 	defer reader.Close()
 
-	var ticks []ParquetTick
 	for {
 		var t ParquetTick
-		err := reader.Read(&t)
-		if err != nil {
+		if err := reader.Read(&t); err != nil {
 			break
 		}
 		ticks = append(ticks, t)

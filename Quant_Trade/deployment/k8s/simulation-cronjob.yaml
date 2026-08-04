@@ -62,11 +62,12 @@ metadata:
   annotations:
     description: "C++ exchange simulator, runs daily at 05:00 UTC"
 spec:
-  schedule: "*/10 * * * *"                # Runs every 10 minutes (e.g. 2:00, 2:10, 2:20, etc.)
-  concurrencyPolicy: Forbid            # skips new run if previous pod is still active
-  startingDeadlineSeconds: 60          # skips run if cluster misses schedule by >60s
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 5
+  suspend: true                          # Suspended to prevent DNS poisoning from completed pods
+  schedule: "*/10 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 60
+  successfulJobsHistoryLimit: 0
+  failedJobsHistoryLimit: 0
 
   jobTemplate:
     metadata:
