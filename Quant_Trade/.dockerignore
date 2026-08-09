@@ -39,3 +39,32 @@ ml/inference/*_pb2_grpc.py
 .vscode/
 .idea/
 .gemini/
+# ML data, models, artifacts and caches
+ml/data/
+ml/models/
+ml/artifacts/
+ml/logs/
+ml/__pycache__/
+ml/*.pyc
+ml/*.pkl
+ml/*.h5
+ml/*.onnx
+ml/*.joblib
+*.ckpt
+*.pt
+*.hdf5
+
+# large archives and datasets
+*.tar.gz
+*.zip
+
+# virtualenvs and Python caches
+.venv/
+venv/
+.env
+.mypy_cache/
+.pytest_cache/
+
+# other build artefacts
+artifacts/
+tmp/
