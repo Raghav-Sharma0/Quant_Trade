@@ -1,70 +1,97 @@
-# Dependency and build directories
+# ==============================================================
+# .dockerignore — QuantTrade HFT Platform
+# Keeps build contexts lean and avoids Windows path issues
+# ==============================================================
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE / editor files
+.vscode/
+.idea/
+.gemini/
+*.swp
+*.swo
+
+# ---------------------------------------------------------------
+# Node / Frontend
+# ---------------------------------------------------------------
 node_modules/
 frontend/node_modules/
 .next/
 frontend/.next/
 out/
 dist/
-build/
-.git/
-.gitignore
 
-# Go binaries and local builds
+# ---------------------------------------------------------------
+# Go binaries (local builds)
+# ---------------------------------------------------------------
 backend-go/server
 backend-go/server.exe
 backend-go/server.exe~
 
-# C++ build directories and simulator bin
+# ---------------------------------------------------------------
+# C++ build outputs
+# ---------------------------------------------------------------
 exchange-sim/build/
 exchange-sim/build_debug/
 exchange-sim/exchange_sim
+core-cpp/build/
 
-# Local logs and database files
-logs/
-data/ticks/
-*.parquet
-*.csv
-*.json
-
-# Python environment
+# ---------------------------------------------------------------
+# Python / ML
+# ---------------------------------------------------------------
 .venv/
+venv/
 __pycache__/
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
-ml/inference/*_pb2.py
-ml/inference/*_pb2_grpc.py
-
-# IDE files
-.vscode/
-.idea/
-.gemini/
-# ML data, models, artifacts and caches
+.mypy_cache/
+.pytest_cache/
 ml/data/
 ml/models/
 ml/artifacts/
 ml/logs/
 ml/__pycache__/
+ml/**/__pycache__/
 ml/*.pyc
 ml/*.pkl
 ml/*.h5
 ml/*.onnx
 ml/*.joblib
+ml/inference/*_pb2.py
+ml/inference/*_pb2_grpc.py
+
+# ---------------------------------------------------------------
+# Data files (large / runtime-generated)
+# ---------------------------------------------------------------
+data/ticks/
+artifacts/
+logs/
+tmp/
+*.parquet
+*.csv
 *.ckpt
 *.pt
 *.hdf5
-
-# large archives and datasets
 *.tar.gz
 *.zip
 
-# virtualenvs and Python caches
-.venv/
-venv/
+# ---------------------------------------------------------------
+# Secrets / environment
+# ---------------------------------------------------------------
 .env
-.mypy_cache/
-.pytest_cache/
+.env.*
+*.pem
+*.key
 
-# other build artefacts
-artifacts/
-tmp/
+# ---------------------------------------------------------------
+# Docs / scripts (not needed inside images)
+# ---------------------------------------------------------------
+docs/
+scripts/
+*.md

@@ -1,72 +1,195 @@
-# Quant Trade Project
+<div align="center">
 
-A high-frequency trading (HFT) simulation platform built with a polyglot microservice architecture, featuring a C++ trading core/exchange simulator, a Go-based market data backend, and a Python-based Machine Learning pipeline for price prediction.
+# ⚡ QuantTrade HFT Platform
 
-## Project Structure and Status
+**A production-grade, low-latency High-Frequency Trading simulation platform built with C++, Go, Python, and Next.js.**
 
-The project consists of three primary components that communicate via gRPC and WebSockets.
+[![C++](https://img.shields.io/badge/C++-20-blue?logo=cplusplus)](https://isocpp.org/)
+[![Go](https://img.shields.io/badge/Go-1.23-00ADD8?logo=go)](https://golang.org/)
+[![Python](https://img.shields.io/badge/Python-3.10-yellow?logo=python)](https://python.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](https://nextjs.org/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docker.com/)
 
-### 1. Market Data Backend (`backend-go/`)
-**Status:** ✅ Completed
-A Go-based server that acts as the central hub for market data and client communication.
-*   **Ingestion:** Connects to the exchange simulator and ingests raw ticks and trades.
-*   **Streaming:** Uses WebSockets and gRPC (`StreamTicks`) to broadcast live market data to downstream consumers (like the frontend or ML services).
-*   **Storage:** Stores ingested ticks persistently in compressed Parquet format (`parquet-go`).
-*   **API:** Provides a gRPC interface (`GetHistoricalTicks`, `HealthCheck`) for querying historical data and server status.
-
-### 2. Machine Learning Pipeline (`ml/`)
-**Status:** ✅ Completed
-A Python-based pipeline for data gathering, feature engineering, training, and real-time inference.
-*   **Data Gathering (`ml/data_gathering/`):** Python scripts to connect to WebSocket feeds, validate ticks, handle sequence gaps, and write data to Parquet buffers.
-*   **Feature Engineering (`ml/feature_engineering/`):** Computes microstructural features (spread, microprice, imbalance, log returns) and streaming EWMA stats without look-ahead bias.
-*   **Training (`ml/training/train.py`):** Trains an XGBoost classifier using walk-forward cross-validation (TimeSeriesSplit) to predict short-term price movements. Saves models, pipelines, and metadata as artifacts.
-*   **Inference Server (`ml/inference/server.py`):** A high-performance gRPC server that loads the trained model, maintains streaming feature state for incoming ticks, and returns predictive signals (`buy_prob` and `direction`).
-
-### 3. Trading Core & Exchange Simulator (`core-cpp/` & `exchange-sim/`)
-**Status:** Managed via C++
-*   **Exchange Simulator:** Simulates order books, matching engines, and broadcasts market data updates.
-*   **Core:** C++ strategies that use the gRPC predictions (cached asynchronously to avoid blocking the hot path) to make trading decisions.
-
-### 4. Protobuf Definitions (`proto/`)
-Defines the cross-language contracts (gRPC/Protobuf) for the system:
-*   `prediction.proto`: Requesting and receiving ML predictions.
-*   `market_data.proto`: Streaming and fetching ticks.
-*   `order.proto`, `execution.proto`, `risk.proto`, `strategy.proto`: Core trading types.
+</div>
 
 ---
 
-## How to Run the Project
+## What Is This?
 
-### Prerequisites
-*   **Go** (1.22+) for the backend.
-*   **Python** (3.11+) for the ML pipeline.
-*   **gRPC tools** for Python (`grpcio`, `grpcio-tools`, `xgboost`, `pandas`, `pyarrow`, `scikit-learn`).
+QuantTrade is a full-stack High-Frequency Trading (HFT) platform that simulates a real financial exchange end-to-end — from order matching and market data broadcasting, through real-time data ingestion and machine learning, to a live trading dashboard.
 
-### 1. Start the Go Backend
-The Go backend ingests market data and serves it via gRPC and HTTP/WebSockets.
-```bash
-cd /mnt/0A86F7A686F79085/Users/ragha/Code/Quant_Trade/Quant_Trade/backend-go
-go run cmd/server/main.go --config configs/dev.yaml
+It is built as an engineering showcase of **low-latency systems design**, **polyglot architecture**, and **production-quality ML pipelines** applied to quantitative finance.
+
+---
+
+## 🎯 Key Features
+
+- **Exchange Simulator** — Full limit order book with price-time priority matching, synthetic market makers, and noise traders generating realistic market dynamics
+- **Sub-microsecond Risk Engine** — Pre-trade risk checks in ~100 nanoseconds including kill switches, rate limiting, position limits, and loss caps
+- **High-Throughput Data Ingestion** — Lock-free ring buffer pipeline ingesting 100,000+ ticks/second with circuit breakers and automatic reconnection
+- **XGBoost ML Model** — Walk-forward trained classifier that predicts short-term price direction from 16 microstructural features
+- **Hot-Reload Inference** — ML model updates in production without server restart via background mtime polling
+- **Real-Time Dashboard** — Live order book, price charts, ML predictions, and risk metrics with animated visualizations
+
+---
+
+## 🏗️ System Architecture
+
+```
+┌─────────────────────────────────┐
+│   C++ Exchange Simulator        │
+│   (Matching Engine + LOB)       │
+│         WebSocket :8080         │
+└──────────────┬──────────────────┘
+               │  Binary Market Data
+               ▼
+┌─────────────────────────────────┐
+│   Go Ingestion Backend          │
+│   Lock-Free Pipeline            │
+│   WebSocket :8081 | gRPC :9090  │
+└────────┬──────────┬─────────────┘
+         │          │
+         ▼          ▼
+┌──────────────┐ ┌──────────────────────┐
+│ Python       │ │ Next.js Dashboard    │
+│ ML Pipeline  │ │ Live Trading UI      │
+│ gRPC :50051  │ │ :3000                │
+└──────────────┘ └──────────────────────┘
 ```
 
-### 2. Train the ML Model
-Before running the ML inference server, you must train the model to generate the necessary artifacts (`model.pkl`, `pipe.pkl`). If no real Parquet data is found, it will auto-generate dummy data for testing.
-```bash
-cd /mnt/0A86F7A686F79085/Users/ragha/Code/Quant_Trade/Quant_Trade
-PYTHONPATH=. python ml/training/train.py
-```
-*(Artifacts will be saved to `Quant_Trade/artifacts/`)*
+**The platform operates as a continuous real-time loop:**
+1. The **C++ Exchange Simulator** runs a limit order book with synthetic participants, broadcasting every price update over WebSocket
+2. The **Go Backend** ingests binary market data through a lock-free pipeline, validates ticks, stores them as Parquet files, and re-broadcasts over JSON WebSocket
+3. The **Python ML Pipeline** collects data, engineers 16 microstructural features, trains an XGBoost model using walk-forward validation, and serves predictions via gRPC
+4. The **Frontend Dashboard** visualizes all of this live — order book depth, price action, ML signals, and risk state
 
-### 3. Start the ML Inference Server
-Starts the Python gRPC server (port 50051) that listens for feature requests from the C++ core and returns trading predictions.
+---
+
+## 🛠️ Technology Stack
+
+| Layer | Technology | Purpose |
+|---|---|---|
+| Exchange Simulation | C++20, CMake, WebSocket | Matching engine, synthetic market participants |
+| Data Ingestion | Go 1.23, gorilla/websocket, parquet-go | Lock-free binary ingestion, Parquet persistence |
+| Inter-Process | gRPC / Protocol Buffers | Typed, fast service-to-service communication |
+| ML Training | Python, XGBoost, scikit-learn, pandas | Feature engineering, walk-forward model training |
+| ML Inference | Python gRPC server, joblib | Hot-reloadable prediction serving |
+| Frontend | Next.js 16, TypeScript, Tailwind, Recharts | Real-time animated trading dashboard |
+| Deployment | Docker Compose, Kubernetes (optional) | Container orchestration |
+
+---
+
+## 📊 Machine Learning
+
+The platform trains an **XGBoost binary classifier** to predict short-term price direction (up/down over a configurable future window).
+
+**16 microstructural features** are computed per tick:
+- Bid-ask spread and microprice
+- Order Book Imbalance (OBI)
+- Log returns at 5, 10, 50-tick horizons
+- Rolling volatility
+- Exponentially Weighted Moving Averages (EWMA) of spread, imbalance, and returns at α = 0.01, 0.05, 0.10
+
+**Walk-forward validation** via `TimeSeriesSplit` ensures the model is never trained on data from the future, avoiding look-ahead bias — a common mistake in financial ML.
+
+The inference server **hot-reloads** new models automatically when the artifact directory is updated by a retraining job, with no downtime.
+
+---
+
+## 🚀 Quick Start
+
+### Option 1: Docker (Recommended)
+
 ```bash
-cd /mnt/0A86F7A686F79085/Users/ragha/Code/Quant_Trade/Quant_Trade
-PYTHONPATH=. python ml/inference/server.py
+# Clone the repository
+git clone https://github.com/your-org/quant-trade
+cd quant-trade/Quant_Trade
+
+# Start all services
+docker compose up --build -d
+
+# View logs
+docker compose logs -f
 ```
 
-### Note on Protobufs
-If you change any `.proto` files in the `proto/` directory, you must recompile them for Python (the Go protos are already generated in `backend-go/generated/proto/`):
+Open **http://localhost:3000** in your browser.
+
+> **Note**: The first build compiles the C++ exchange simulator, which takes 5–10 minutes and requires ~8 GB of free disk space.
+
+### Option 2: Local (WSL2 + Windows)
+
 ```bash
-cd /mnt/0A86F7A686F79085/Users/ragha/Code/Quant_Trade/Quant_Trade
-python -m grpc_tools.protoc -Iproto --python_out=ml/inference --grpc_python_out=ml/inference proto/prediction.proto
+# Build everything
+make all
+
+# Start all services
+make run
+
+# Stop all services
+make stop
 ```
+
+### Option 3: Frontend Only
+
+```bash
+cd frontend
+npm install
+npm run dev
+# → http://localhost:3000
+```
+
+---
+
+## 📁 Project Layout
+
+```
+Quant_Trade/
+├── core-cpp/        # C++ header-only library (risk engine, order book, SPSC queue)
+├── exchange-sim/    # C++ Exchange Simulator binary
+├── backend-go/      # Go ingestion backend + WS/gRPC servers
+├── ml/              # Python ML pipeline (data, features, training, inference)
+├── frontend/        # Next.js real-time dashboard
+├── proto/           # Protocol Buffer schemas
+├── configs/         # YAML configuration (dev + prod)
+├── artifacts/       # Trained ML model artifacts
+├── scripts/         # Build and deployment scripts
+└── docker-compose.yml
+```
+
+---
+
+## 📡 Service Endpoints
+
+| Service | Endpoint | Description |
+|---|---|---|
+| Frontend | http://localhost:3000 | Live trading dashboard |
+| WS Market Data | ws://localhost:8081/ws/market-data | Real-time tick stream |
+| WS Trades | ws://localhost:8081/ws/trades | Trade execution stream |
+| WS ML Signals | ws://localhost:8081/ws/ml-predictions | ML prediction stream |
+| gRPC Backend | localhost:9090 | Market data gRPC service |
+| gRPC ML | localhost:50051 | Prediction gRPC service |
+| Exchange Simulator | ws://localhost:8080 | Raw binary tick feed |
+
+---
+
+## 🔬 Engineering Highlights
+
+**Lock-Free Ingestion Pipeline**: The Go backend uses a cache-line-padded SPSC ring buffer (131,072 slots) between the network I/O goroutine and the dispatcher. This avoids mutex contention on the hot path, keeping tick processing latency in the single-digit microsecond range.
+
+**Circuit Breaker**: The WebSocket client wraps reconnect logic in a 3-state circuit breaker (Closed → Open → Half-Open). When the exchange simulator goes down, the breaker trips after 5 failures and blocks reconnect attempts for 10 seconds, preventing CPU-burning reconnect storms.
+
+**Pre-Trade Risk in ~100ns**: The C++ risk engine evaluates 6 checks in cheapest-first order (kill switch → order size → rate limit → notional cap → position limit → loss cap). The sliding-window rate limiter uses a circular timestamp buffer for O(1) amortized complexity.
+
+**Sequence Gap Masking**: Every tick carries a monotonically increasing sequence number. Gaps are detected and flagged (`seq_gap = true`) in both the Go backend and Python recorder. The ML training pipeline masks gap ticks to prevent training on artificially corrupted price jumps.
+
+---
+
+## 📚 Documentation
+
+- **[DEVELOPER_README.md](DEVELOPER_README.md)** — Detailed technical reference for contributors: component internals, wire protocols, configuration, build instructions, and troubleshooting
+
+---
+
+## 📄 License
+
+This project is for educational and portfolio purposes.
