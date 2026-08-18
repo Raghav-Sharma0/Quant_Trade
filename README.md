@@ -287,10 +287,9 @@ kubectl rollout status deployment/hft-frontend-deploy -n hft --timeout=120s
 - Windows path and context transfer issues during `docker build`.
 - Insufficient Docker disk space for C++ image compilation.
 
-## 8. Related Detailed Reference
 
-For deeper internal details, use `DEVELOPER_README (1).md` as the full technical reference for component internals, schema formats, and benchmark notes.
+## 8. License
 
-## 9. License
+This project is licensed under the MIT License
 
-This project is intended for educational and portfolio use.
+
